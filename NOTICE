@@ -1,0 +1,24 @@
+python-can-canable
+Copyright (c) 2026 Shreesha SN
+
+This project contains protocol constants, enumerations, and struct layouts derived from
+the ElmüSoft Candlelight 2.5 firmware, which is distributed under the MIT License.
+
+Upstream project:
+    https://github.com/Elmue/CANable-2.5-firmware-Slcan-and-Candlelight
+
+Primary derived reference:
+    SampleApplication Python/Source/Candlelight_def.py
+    Firmware/Candlelight/candlelight_def.h
+    Firmware/Candlelight/control.c
+    Firmware/Candlelight/buffer.c
+    Firmware/Candlelight/usb_class.c
+    Firmware/settings.h
+    Firmware/system.c
+
+Upstream documentation:
+    https://netcult.ch/elmue/CANable%20Firmware%20Update/
+
+The Elmü firmware and its Python sample are credited to ElmüSoft (netcult.ch/elmue).
+The upstream MIT License terms apply to the derived protocol definitions. This project's
+own source code is licensed under the MIT License in LICENSE.
