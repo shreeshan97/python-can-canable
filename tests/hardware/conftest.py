@@ -10,6 +10,7 @@ the registry.
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -204,6 +205,22 @@ def _permission_denied(exc: BaseException) -> bool:
     )
 
 
+def _usb_access_hint() -> str:
+    """Return a platform-specific remedy for raw USB access failures.
+
+    Returns:
+        Text describing the OS driver or permission setup to check.
+    """
+    if sys.platform.startswith("linux"):
+        return "install udev/99-canable.rules and replug (or use sudo for diagnosis)"
+    if sys.platform == "win32":
+        return (
+            "confirm WinUSB was installed from the Elmü 2.5 firmware descriptors "
+            "and that PyUSB can load libusb 1.0"
+        )
+    return "check the host USB driver/backend and raw USB access"
+
+
 def _close_open_candle_devices() -> None:
     """Close any candle devices left open by a partially initialized bus."""
     try:
@@ -236,8 +253,7 @@ def _open_bus(options: dict[str, Any], label: str) -> can.BusABC:
             _close_open_candle_devices()
         if _permission_denied(exc):
             pytest.skip(
-                f"raw USB access denied for {label}; install udev/99-canable.rules "
-                "and replug, or run with sudo"
+                f"raw USB access denied for {label}; {_usb_access_hint()}"
             )
         if label != "canable":
             pytest.skip(f"{label} adapter is unavailable: {exc}")

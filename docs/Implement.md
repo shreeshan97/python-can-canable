@@ -286,10 +286,12 @@ sample point with deterministic tie-breaking. `bit_timing.py` is unit-testable w
 3. Reattach the kernel driver if it was detached.
 4. Mark the bus closed; `shutdown()` is idempotent.
 
-## USB permissions
+## USB host setup and permissions
 
-Current host USB nodes for `1d50:606f` are `root:root 0664`; user `ssn` cannot open them.
+Host setup is OS-specific; see [USB-Setup.md](USB-Setup.md) for the full guide. The plugin uses
+PyUSB/libusb, so a host USB driver and a usable libusb backend are separate requirements.
 
+Linux host USB nodes for `1d50:606f` were `root:root 0664`; user `ssn` could not open them.
 Recommended rule in `udev/99-canable.rules`:
 
 ```udev
@@ -299,6 +301,11 @@ SUBSYSTEM=="usb", ATTR{idVendor}=="1d50", ATTR{idProduct}=="606f", GROUP="plugde
 Install, replug, and verify. Fallback: run test scripts with `sudo` (or as a user with raw USB
 access). Opening the plugin detaches `gs_usb`, so SocketCAN `can0` for this board disappears
 while the plugin owns it. The old FYSETC on `can1` is unaffected unless the candle test owns it.
+
+Correct Elmü 2.5 firmware reports Microsoft OS descriptors (`MSFT100`, vendor code `0x20`,
+compatible ID `USB\MS_COMP_WINUSB`) so Windows installs WinUSB automatically for interfaces 0
+and 1. Do not use Zadig on that firmware: it can replace the correct Candlelight interface GUID
+and make CAN tools fail to find the adapter. Windows also needs a libusb 1.0 runtime for PyUSB.
 
 ## Testing strategy
 
@@ -320,7 +327,8 @@ Unit and live-hardware tests are separate suites; see [Testing.md](Testing.md).
 - Frame delivery passes adapter↔adapter against the `python-can-candle` reference at all
   popular classic bitrates from 10 kbit/s to 1 Mbit/s.
 - Unit tests pass without hardware.
-- Docs explain permissions, kernel-driver detachment, and the `lsusb` generic-name caveat.
+- Docs explain permissions, kernel-driver detachment, Windows WinUSB/libusb setup, and the
+  `lsusb` generic-name caveat.
 - Changes are committed locally; nothing is pushed.
 
 ## Out of scope

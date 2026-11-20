@@ -2,6 +2,7 @@
 
 - [Implement.md](Implement.md) — implementation plan, scope, API, and acceptance criteria.
 - [Protocol.md](Protocol.md) — Elmü CANable 2.5 USB protocol reference with attribution.
+- [USB-Setup.md](USB-Setup.md) — Linux, Windows, and macOS driver/backend requirements.
 - [Testing.md](Testing.md) — separated unit and live-hardware test suites.
 
 The board-specific bring-up record lives at

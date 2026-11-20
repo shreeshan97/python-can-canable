@@ -34,7 +34,7 @@ def main() -> None:
         bus.send(sent)
         received = bus.recv(2.0)
         if received is None:
-            print("No frame received; check bitrate, termination, and USB access.")
+            print("No frame received; check bitrate, termination, and USB driver/backend.")
         else:
             print(f"received: ID=0x{received.arbitration_id:X} data={received.data.hex()}")
 

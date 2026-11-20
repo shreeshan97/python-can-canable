@@ -39,6 +39,18 @@ configs = can.detect_available_configs("canable")
 Select devices by serial because the target and the reference adapter share VID/PID
 `1d50:606f`. See [examples/](examples/) for runnable snippets.
 
+## Host USB setup
+
+- **Linux:** install [`udev/99-canable.rules`](udev/99-canable.rules) and replug. The plugin
+  detaches `gs_usb` from interface 0 while it owns the board.
+- **Windows:** correct Elmü 2.5 firmware exposes Microsoft OS descriptors, so Windows should
+  install WinUSB automatically. **Do not use Zadig** on correctly flashed hardware; it can
+  overwrite the Candlelight interface GUID. PyUSB additionally needs a matching libusb 1.0
+  runtime.
+- **macOS:** install a compatible libusb 1.0 runtime.
+
+See [USB setup](docs/USB-Setup.md) for descriptor details, verification, and troubleshooting.
+
 ## Development
 
 ```sh
@@ -48,8 +60,8 @@ pytest                                # unit tests only
 CANABLE_HW=1 pytest tests/hardware -q # live hardware tests
 ```
 
-USB access requires `udev/99-canable.rules` (recommended) or root privileges. Opening the
-plugin detaches the `gs_usb` kernel driver from interface 0.
+Hardware tests need raw USB access on the chosen host; see [USB setup](docs/USB-Setup.md) and
+[Testing](docs/Testing.md). No Windows hardware validation has been recorded yet.
 
 ## License
 

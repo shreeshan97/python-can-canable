@@ -32,7 +32,8 @@ python3 -m venv .venv
 ```
 
 The unit suite needs only `python-can` and `pytest`. The hardware suite additionally needs
-`python-can-candle` for the reference adapter and raw USB access via `pyusb`.
+`python-can-candle` for the reference adapter and raw USB access via `pyusb`. Complete the
+OS-specific setup in [USB-Setup.md](USB-Setup.md) before running hardware tests.
 
 ## Unit tests
 
@@ -104,6 +105,31 @@ done
 | `test_hw_fd.py` | CAN FD transfer in both directions with 16- and 64-byte payloads. Skips until an FD-capable reference is registered with `CANABLE_FD_SERIAL`; also verifies the target firmware advertises FD capability. |
 | `test_hw_shutdown.py` | Idempotent shutdown and clean kernel-driver state via `bus.kernel_driver_restored`. |
 
+### Windows manual smoke test
+
+There is no recorded Windows hardware run yet. On a Windows host with correct Elmü 2.5
+firmware, verify the host stack in this order:
+
+1. Confirm Windows installed WinUSB automatically from the firmware's Microsoft OS
+   descriptors. Do not use Zadig on this adapter; see [USB-Setup.md](USB-Setup.md).
+2. Confirm the Python architecture can load a libusb 1.0 runtime.
+3. List adapters and open the target by serial:
+   ```powershell
+   python examples/list_devices.py
+   python examples/simple_send_receive.py
+   ```
+   Set `CANABLE_SERIAL` if the board is not the default one.
+4. If a configured reference adapter is also connected, run the full suite:
+   ```powershell
+   $env:CANABLE_HW = "1"
+   pytest tests/hardware -q
+   ```
+
+The reference adapter needs its own working python-can backend and OS driver. For the FYSETC
+UCAN that means `python-can-candle`; its driver setup is separate from the Elmü target's WinUSB
+binding. WinUSB plus libusb working for the target does not by itself validate the reference
+adapter.
+
 ### Reference adapter registry
 
 Reference adapters are declared in `tests/hardware/conftest.py`. The FYSETC UCAN is the
@@ -143,11 +169,13 @@ firmware and the CANable target use equivalent 8-TQ timings.
 
 ### Driver contention and permissions
 
-- Hardware tests must run serially (no `pytest-xdist`). Opening either plugin detaches
-  `gs_usb`; the corresponding SocketCAN interface disappears while owned.
+- Hardware tests must run serially (no `pytest-xdist`). On Linux, opening either plugin
+  detaches `gs_usb`; the corresponding SocketCAN interface disappears while owned.
 - Do not mix SocketCAN and plugin access to the same device in one test.
-- Install `udev/99-canable.rules` (`plugdev` + `uaccess`) and replug, or run with `sudo`.
-  Tests skip with an actionable message on `LIBUSB_ERROR_ACCESS`.
+- Follow [USB-Setup.md](USB-Setup.md) for the host driver and libusb backend. Linux needs
+  `udev/99-canable.rules` (`plugdev` + `uaccess`) and a replug; Windows needs correct firmware
+  MS OS descriptors, automatic WinUSB binding, and a libusb 1.0 runtime. `sudo` is only a Linux
+  diagnostic fallback. Tests skip with an actionable message on `LIBUSB_ERROR_ACCESS`.
 - Plain `lsusb` prints `OpenMoko, Inc. Geschwister Schneider CAN adapter` for both devices;
   that name comes from the host USB ID database, not the firmware.
 
@@ -161,8 +189,10 @@ firmware and the CANable target use equivalent 8-TQ timings.
 | Symptom | Check |
 | --- | --- |
 | Hardware tests all skip | Set `CANABLE_HW=1` and verify both serials. |
-| `LIBUSB_ERROR_ACCESS` | Install the udev rule, replug, or use `sudo`. |
-| No frames received | Confirm 500000 bitrate, loopback off, unique IDs, and that `gs_usb` was detached cleanly. |
+| `LIBUSB_ERROR_ACCESS` | Linux: install the udev rule and replug; `sudo` is diagnostic only. Windows: check automatic WinUSB binding from the 2.5 firmware descriptors. |
+| PyUSB reports "No backend available" | Install a libusb 1.0 runtime matching the Python architecture; see [USB-Setup.md](USB-Setup.md). |
+| Windows WinUSB device is not detected by a GUI CAN tool | Do not use Zadig on correct firmware; verify the Candlelight interface GUID was not overwritten. |
+| No frames received | Confirm 500000 bitrate, loopback off, unique IDs, and clean driver handoff on Linux. |
 | Error frames counted | Check bitrate/clock, termination, and CANH/CANL; zero errors is the pass criterion. |
-| Reference device not found | Confirm `python-can-candle` is installed and `CANDLE_SERIAL` matches sysfs. |
-| `can0`/`can1` missing | Expected while a plugin owns the USB device; use the plugin, not SocketCAN. |
+| Reference device not found | Confirm `python-can-candle` is installed, its OS driver is bound, and `CANDLE_SERIAL` matches the adapter. |
+| `can0`/`can1` missing | Expected on Linux while a plugin owns the USB device; use the plugin, not SocketCAN. |
