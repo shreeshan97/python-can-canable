@@ -50,6 +50,7 @@ def test_loopback_variants(
         is_remote_frame=is_remote,
         is_rx=False,
     )
+    bus.send(sent)
     received = receive_matching(bus, sent, timeout)
     assert received is not None
     assert received.is_rx

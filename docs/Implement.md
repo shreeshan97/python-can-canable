@@ -291,7 +291,7 @@ Current host USB nodes for `1d50:606f` are `root:root 0664`; user `ssn` cannot o
 Recommended rule in `udev/99-canable.rules`:
 
 ```udev
-SUBSYSTEM=="usb", ATTR{idVendor}=="1d50", ATTR{idProduct}=="606f", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1d50", ATTR{idProduct}=="606f", GROUP="plugdev", MODE="0660", TAG+="uaccess"
 ```
 
 Install, replug, and verify. Fallback: run test scripts with `sudo` (or as a user with raw USB

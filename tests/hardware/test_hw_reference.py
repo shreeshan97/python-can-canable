@@ -23,14 +23,14 @@ def test_reference_both_directions(
 
     target_to_reference = can.Message(
         arbitration_id=0x301,
-        data=b"to-reference",
+        data=b"to-ref",
         is_extended_id=False,
     )
     transfer(target, reference, target_to_reference, timeout)
 
     reference_to_target = can.Message(
         arbitration_id=0x302,
-        data=b"to-canable",
+        data=b"to-can",
         is_extended_id=False,
     )
     transfer(reference, target, reference_to_target, timeout)

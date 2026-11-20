@@ -1,3 +1,3 @@
 # Allow regular users to access Elmü CANable 2.5 / Candlelight 2.5 adapters.
 # Both the CanableDevBoard FDCAN and legacy gs_usb devices use 1d50:606f.
-SUBSYSTEM=="usb", ATTR{idVendor}=="1d50", ATTR{idProduct}=="606f", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1d50", ATTR{idProduct}=="606f", GROUP="plugdev", MODE="0660", TAG+="uaccess"

@@ -19,17 +19,25 @@ DEFAULT_CANABLE_SERIAL = "209D3889594550052"
 DEFAULT_CANDLE_SERIAL = "003500465446571320343032"
 
 
-def pytest_collection_modifyitems(items: List[Any]) -> None:
-    """Skip the whole hardware suite unless ``CANABLE_HW=1`` is set.
+def pytest_collection_modifyitems(config: Any, items: List[Any]) -> None:
+    """Gate live tests on ``CANABLE_HW`` and keep stress tests opt-in.
 
     Args:
+        config: Pytest configuration, used to inspect the ``-m`` expression.
         items: Collected pytest items.
     """
-    if os.environ.get("CANABLE_HW") == "1":
+    if os.environ.get("CANABLE_HW") != "1":
+        skip = pytest.mark.skip(reason="set CANABLE_HW=1 to run live-hardware tests")
+        for item in items:
+            item.add_marker(skip)
         return
-    skip = pytest.mark.skip(reason="set CANABLE_HW=1 to run live-hardware tests")
-    for item in items:
-        item.add_marker(skip)
+
+    mark_expression = str(getattr(config.option, "markexpr", "") or "")
+    if "stress" not in mark_expression:
+        skip = pytest.mark.skip(reason="opt-in stress test; rerun with -m stress")
+        for item in items:
+            if item.get_closest_marker("stress"):
+                item.add_marker(skip)
 
 
 def _exception_text(exc: BaseException) -> str:
@@ -67,6 +75,22 @@ def _open_bus(options: dict[str, Any], label: str) -> can.BusABC:
         if label == "reference":
             pytest.skip(f"reference adapter is unavailable: {exc}")
         raise
+
+
+def close_bus(bus: can.BusABC) -> None:
+    """Shut down a bus and close any plugin-owned USB device.
+
+    ``python-can-candle`` keeps its libusb device open after ``shutdown()``.
+    Tests must close it explicitly before reopening the same reference adapter.
+
+    Args:
+        bus: Bus created by a hardware-test factory.
+    """
+    if not getattr(bus, "_is_shutdown", False):
+        bus.shutdown()
+    device = getattr(bus, "_device", None)
+    if device is not None and getattr(device, "is_open", False):
+        device.close()
 
 
 @pytest.fixture(scope="session")
@@ -115,8 +139,7 @@ def canable_bus_factory(
 
     yield factory
     for bus in reversed(buses):
-        if not getattr(bus, "_is_shutdown", False):
-            bus.shutdown()
+        close_bus(bus)
 
 
 @pytest.fixture
@@ -140,8 +163,7 @@ def reference_bus_factory(
 
     yield factory
     for bus in reversed(buses):
-        if not getattr(bus, "_is_shutdown", False):
-            bus.shutdown()
+        close_bus(bus)
 
 
 def matches(expected: can.Message, received: can.Message) -> bool:

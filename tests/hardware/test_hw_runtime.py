@@ -8,7 +8,7 @@ import can
 import pytest
 
 from canable.protocol import DeviceFlags
-from conftest import transfer
+from conftest import close_bus, transfer
 
 pytestmark = pytest.mark.hardware
 
@@ -30,13 +30,19 @@ def test_runtime_bitrate_changes(
 ) -> None:
     """Bitrate changes at runtime keep both adapters in sync."""
     target = canable_bus_factory()
-    with reference_bus_factory() as reference:
+    reference = reference_bus_factory()
+    try:
         transfer(target, reference, _message(0x501, b"initial"), timeout)
+    finally:
+        close_bus(reference)
 
     for new_bitrate, can_id in ((250_000, 0x502), (bitrate, 0x503)):
         target.set_bitrate(new_bitrate)
-        with reference_bus_factory(bitrate=new_bitrate) as reference:
+        reference = reference_bus_factory(bitrate=new_bitrate)
+        try:
             transfer(reference, target, _message(can_id, b"rate"), timeout)
+        finally:
+            close_bus(reference)
 
     assert target.error_frame_count == 0
 
@@ -48,7 +54,8 @@ def test_acceptance_filters(
 ) -> None:
     """Host pass filters accept the selected ID and block other IDs."""
     target = canable_bus_factory()
-    with reference_bus_factory() as reference:
+    reference = reference_bus_factory()
+    try:
         target.set_filters([{"can_id": 0x123, "can_mask": 0x7FF, "extended": False}])
         transfer(reference, target, _message(0x123, b"pass"), timeout)
         transfer(
@@ -59,7 +66,9 @@ def test_acceptance_filters(
             expect_success=False,
         )
         target.clear_filters()
-        transfer(reference, target, _message(0x124, b"unblocked"), timeout)
+        transfer(reference, target, _message(0x124, b"unblock"), timeout)
+    finally:
+        close_bus(reference)
 
 
 def test_fd_send_receive_if_supported(
@@ -88,7 +97,16 @@ def test_fd_send_receive_if_supported(
         is_fd=True,
         bitrate_switch=True,
     )
-    transfer(target, reference, message, timeout)
+    try:
+        supports_fd = any(
+            getattr(getattr(channel, "feature", None), "fd", False)
+            for channel in reference._channels.values()
+        )
+        if not supports_fd:
+            pytest.skip("reference adapter does not support CAN FD")
+        transfer(target, reference, message, timeout)
+    finally:
+        close_bus(reference)
 
 
 def test_pin_status_read_only(

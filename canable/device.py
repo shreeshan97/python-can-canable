@@ -444,7 +444,7 @@ class CanableUsbDevice:
                 self._kernel_detached = True
 
         try:
-            device.claim_interface(self.interface)
+            self._claim_interface(device)
         except (AttributeError, NotImplementedError):
             pass
         except usb.core.USBError as exc:
@@ -567,7 +567,7 @@ class CanableUsbDevice:
             return
         device = self.info.device
         try:
-            device.release_interface(self.interface)
+            self._release_interface(device)
         except (AttributeError, NotImplementedError, ValueError, usb.core.USBError) as exc:
             LOG.debug("could not release interface %d: %s", self.interface, exc)
         if self._kernel_detached:
@@ -579,6 +579,36 @@ class CanableUsbDevice:
                 self.reattached_kernel_driver = True
             self._kernel_detached = False
         self._is_open = False
+
+    def _claim_interface(self, device: Any) -> None:
+        """Claim the CAN interface using PyUSB's managed claim when available.
+
+        PyUSB 1.x performs bulk transfers through ``_ctx.managed_claim_interface``.
+        Claiming through that API keeps the interface in PyUSB's claimed-interface
+        set so it can be released cleanly during shutdown.
+
+        Args:
+            device: Raw USB device object.
+        """
+        context = getattr(device, "_ctx", None)
+        managed = getattr(context, "managed_claim_interface", None)
+        if callable(managed):
+            managed(device, self.interface)
+            return
+        device.claim_interface(self.interface)
+
+    def _release_interface(self, device: Any) -> None:
+        """Release the CAN interface through the matching PyUSB API.
+
+        Args:
+            device: Raw USB device object.
+        """
+        context = getattr(device, "_ctx", None)
+        managed = getattr(context, "managed_release_interface", None)
+        if callable(managed):
+            managed(device, self.interface)
+            return
+        device.release_interface(self.interface)
 
     def _ensure_open(self) -> None:
         """Raise when the USB interface has not been claimed."""

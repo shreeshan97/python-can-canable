@@ -96,7 +96,7 @@ done
 | `test_hw_identity.py` | `can.detect_available_configs("canable")` lists the board; `get_device_version()`, `get_capabilities()`, `get_capabilities_fd()`, `get_board_info()`; board name starts with `CanableDevBoard`; capability flag is present; clock is 160 MHz. |
 | `test_hw_loopback.py` | Classic send/receive via plugin with `receive_own_messages=True`; 11-bit and 29-bit IDs; DLC 0 and 8; remote frame; zero error frames. |
 | `test_hw_reference.py` | Adapter↔adapter both directions using `interface="candle"` for the reference. Receiver thread starts before sender, ignores/counts error frames, asserts ID/payload match. A `stress` marker runs 20 alternating iterations with unique IDs. |
-| `test_hw_runtime.py` | Bitrate changes 500000 → 250000 → 500000 with frame checks at each step; acceptance filters; CAN FD send/receive if capability and timing allow; read-only pin status. |
+| `test_hw_runtime.py` | Bitrate changes 500000 → 250000 → 500000 with frame checks at each step; acceptance filters; CAN FD send/receive if both adapters support it; read-only pin status. The FYSETC reference is classic-only, so the FD case skips on this setup. |
 | `test_hw_shutdown.py` | Idempotent shutdown and clean kernel-driver state via `bus.kernel_driver_restored`. |
 
 ### Reference adapter
@@ -121,8 +121,8 @@ remains documented in the board bring-up repository.
 - Hardware tests must run serially (no `pytest-xdist`). Opening either plugin detaches
   `gs_usb`; the corresponding SocketCAN interface disappears while owned.
 - Do not mix SocketCAN and plugin access to the same device in one test.
-- Install `udev/99-canable.rules` and replug, or run with `sudo`. Tests skip with an
-  actionable message on `LIBUSB_ERROR_ACCESS`.
+- Install `udev/99-canable.rules` (`plugdev` + `uaccess`) and replug, or run with `sudo`.
+  Tests skip with an actionable message on `LIBUSB_ERROR_ACCESS`.
 - Plain `lsusb` prints `OpenMoko, Inc. Geschwister Schneider CAN adapter` for both devices;
   that name comes from the host USB ID database, not the firmware.
 
