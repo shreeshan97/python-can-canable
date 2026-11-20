@@ -5,8 +5,8 @@ the new Elmü 2.5 protocol only.
 
 ## Status
 
-Implementation in progress. The design, protocol reference, and test strategy are documented
-in [docs/](docs/README.md):
+Implemented. The design, protocol reference, and test strategy are documented in
+[docs/](docs/README.md):
 
 - [Implementation plan](docs/Implement.md)
 - [Protocol reference](docs/Protocol.md)
@@ -19,7 +19,7 @@ in [docs/](docs/README.md):
 - VID/PID `1d50:606f`. Both the target board and the reference adapter share this ID, so
   select devices by serial or sysfs product name, not by VID/PID.
 
-## Usage (planned)
+## Usage
 
 ```python
 import can
@@ -32,7 +32,12 @@ with can.Bus(
     ignore_config=True,
 ) as bus:
     bus.send(can.Message(arbitration_id=0x123, data=[1, 2, 3, 4]))
+
+configs = can.detect_available_configs("canable")
 ```
+
+Select devices by serial because the target and the reference adapter share VID/PID
+`1d50:606f`. See [examples/](examples/) for runnable snippets.
 
 ## Development
 

@@ -97,7 +97,7 @@ done
 | `test_hw_loopback.py` | Classic send/receive via plugin with `receive_own_messages=True`; 11-bit and 29-bit IDs; DLC 0 and 8; remote frame; zero error frames. |
 | `test_hw_reference.py` | Adapter↔adapter both directions using `interface="candle"` for the reference. Receiver thread starts before sender, ignores/counts error frames, asserts ID/payload match. A `stress` marker runs 20 alternating iterations with unique IDs. |
 | `test_hw_runtime.py` | Bitrate changes 500000 → 250000 → 500000 with frame checks at each step; acceptance filters; CAN FD send/receive if capability and timing allow; read-only pin status. |
-| `test_hw_shutdown.py` | Idempotent shutdown and clean kernel-driver reattachment. |
+| `test_hw_shutdown.py` | Idempotent shutdown and clean kernel-driver state via `bus.kernel_driver_restored`. |
 
 ### Reference adapter
 

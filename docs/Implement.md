@@ -119,13 +119,14 @@ docs/
 
 ```toml
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "python-can-canable"
 version = "0.1.0"
 requires-python = ">=3.9"
+license = "MIT"
 dependencies = [
   "python-can>=4.2",
   "pyusb>=1.2",
@@ -138,8 +139,8 @@ hardware = ["python-can-candle>=1.2"]
 [project.entry-points."can.interface"]
 canable = "canable.bus:CanableBus"
 
-[tool.setuptools.packages.find]
-include = ["canable*"]
+[tool.setuptools]
+packages = ["canable"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit"]

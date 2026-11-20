@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "python-can-canable"
+version = "0.1.0"
+description = "python-can plugin for Elmü CANable 2.5 USB-CAN adapters"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+authors = [{ name = "Shreesha SN" }]
+dependencies = [
+  "python-can>=4.2",
+  "pyusb>=1.2",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+hardware = ["python-can-candle>=1.2"]
+
+[project.entry-points."can.interface"]
+canable = "canable.bus:CanableBus"
+
+[tool.setuptools]
+packages = ["canable"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit"]
+markers = [
+  "hardware: live-hardware test (not collected by default)",
+  "stress: repeated alternating frames (opt-in)",
+]
