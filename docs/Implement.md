@@ -304,9 +304,10 @@ Unit and live-hardware tests are separate suites; see [Testing.md](Testing.md).
 
 - Unit tests: frame packing/unpacking, struct parsing, feedback codes, bit timing for
   48 MHz and 160 MHz, device selection, init sequence, detection, and buffer/blob handling.
-- Live tests: identity, loopback, adapter↔adapter through `interface="candle"`, a popular
-  classic-bitrate matrix, runtime bitrate changes, filters, and clean driver reattachment.
-  CAN FD transfer is not exercised because the FYSETC reference adapter is classic-only.
+- Live tests: identity, loopback, adapter↔adapter through a reference-adapter registry, a
+  per-adapter popular classic-bitrate matrix, runtime bitrate changes, filters, and clean
+  driver reattachment. FYSETC UCAN is the registered classic reference; FD transfer tests
+  are capability-gated and skip until an FD-capable reference is registered.
 
 ## Acceptance criteria
 

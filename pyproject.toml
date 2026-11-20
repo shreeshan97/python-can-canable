@@ -30,4 +30,5 @@ testpaths = ["tests/unit"]
 markers = [
   "hardware: live-hardware test (not collected by default)",
   "stress: repeated alternating frames (opt-in)",
+  "fd: CAN FD transfer test (requires an FD-capable reference adapter)",
 ]

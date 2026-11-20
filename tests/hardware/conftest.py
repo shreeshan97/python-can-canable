@@ -1,8 +1,10 @@
 """Fixtures and helpers for opt-in live-hardware tests.
 
 The target adapter is always opened through the python-can plugin interface
-(``can.Bus(interface="canable", ...)``). The reference adapter uses the
-``python-can-candle`` plugin with ``interface="candle"``.
+(``can.Bus(interface="canable", ...)``). Reference adapters are described by
+:data:`REFERENCE_ADAPTERS`; the FYSETC UCAN is the configured classic reference.
+FD-capable references can be added through ``CANABLE_FD_SERIAL`` or by extending
+the registry.
 """
 
 from __future__ import annotations
@@ -11,8 +13,9 @@ import os
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import Any, Callable, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 import can
 import pytest
@@ -22,7 +25,7 @@ DEFAULT_CANDLE_SERIAL = "003500465446571320343032"
 
 # CiA-recommended classic CAN bitrates. The FYSETC candle reference has a
 # 48 MHz clock, so python-can-candle's BRP <= 64 helper cannot express 10/20/50
-# kbit/s; the test-only override below supplies equivalent timings.
+# kbit/s; the adapter-specific override below supplies equivalent timings.
 POPULAR_BITRATES = (
     10_000,
     20_000,
@@ -36,6 +39,126 @@ POPULAR_BITRATES = (
 )
 
 _CANDLE_LOW_BITRATE_PRESCALERS = {10_000: 600, 20_000: 300, 50_000: 120}
+
+
+@dataclass(frozen=True)
+class ReferenceAdapter:
+    """Description of one adapter used as the opposite CAN node.
+
+    Attributes:
+        name: Short identifier used in pytest IDs and skip messages.
+        interface: python-can interface name, for example ``"candle"``.
+        serial: USB serial number used to select the adapter.
+        supports_fd: Whether this adapter can transmit and receive CAN FD.
+        fd_data_bitrate: Default FD data-phase bitrate when ``supports_fd``.
+        low_bitrate_prescalers: BRP values for rates the generic timing helper
+            cannot express, keyed by nominal bitrate.
+        classic_bitrates: Nominal bitrates used for this adapter in the classic
+            adapter↔adapter matrix.
+    """
+
+    name: str
+    interface: str
+    serial: str
+    supports_fd: bool = False
+    fd_data_bitrate: int = 2_000_000
+    low_bitrate_prescalers: Dict[int, int] = field(default_factory=dict)
+    classic_bitrates: Tuple[int, ...] = field(
+        default_factory=lambda: POPULAR_BITRATES
+    )
+
+    @property
+    def channel(self) -> str:
+        """Return the python-can channel string for this adapter."""
+        return f"{self.serial}:0"
+
+    def bus_options(
+        self,
+        bitrate: int,
+        *,
+        fd: bool = False,
+        data_bitrate: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Build python-can options for opening this reference adapter.
+
+        Args:
+            bitrate: Nominal bitrate in bit/s.
+            fd: Whether to enable CAN FD.
+            data_bitrate: FD data-phase bitrate; uses the adapter default when
+                omitted.
+
+        Returns:
+            Keyword arguments for :func:`can.Bus`.
+        """
+        options: Dict[str, Any] = {
+            "interface": self.interface,
+            "channel": self.channel,
+            "bitrate": int(bitrate),
+            "sample_point": 87.5,
+            "ignore_config": True,
+        }
+        if fd:
+            options["fd"] = True
+            options["data_bitrate"] = int(data_bitrate or self.fd_data_bitrate)
+            options["data_sample_point"] = 87.5
+        return options
+
+
+FYSETC_UCAN = ReferenceAdapter(
+    name="fysetec-ucan",
+    interface="candle",
+    serial=os.environ.get("CANDLE_SERIAL", DEFAULT_CANDLE_SERIAL),
+    supports_fd=False,
+    low_bitrate_prescalers=dict(_CANDLE_LOW_BITRATE_PRESCALERS),
+)
+
+REFERENCE_ADAPTERS: Tuple[ReferenceAdapter, ...] = (FYSETC_UCAN,)
+
+_FD_SERIAL = os.environ.get("CANABLE_FD_SERIAL")
+if _FD_SERIAL:
+    _FD_CLASSIC_RATES = tuple(
+        int(value)
+        for value in os.environ.get("CANABLE_FD_BITRATES", "").split(",")
+        if value.strip()
+    ) or POPULAR_BITRATES
+    REFERENCE_ADAPTERS += (
+        ReferenceAdapter(
+            name="fd-reference",
+            interface=os.environ.get("CANABLE_FD_INTERFACE", "candle"),
+            serial=_FD_SERIAL,
+            supports_fd=True,
+            fd_data_bitrate=int(os.environ.get("CANABLE_FD_DATA_BITRATE", "2000000")),
+            classic_bitrates=_FD_CLASSIC_RATES,
+        ),
+    )
+
+FD_REFERENCE_ADAPTERS = tuple(
+    adapter for adapter in REFERENCE_ADAPTERS if adapter.supports_fd
+)
+
+REFERENCE_PARAMS = tuple(
+    pytest.param(adapter, id=adapter.name) for adapter in REFERENCE_ADAPTERS
+)
+FD_REFERENCE_PARAMS = tuple(
+    pytest.param(adapter, id=adapter.name) for adapter in FD_REFERENCE_ADAPTERS
+) or (
+    pytest.param(
+        None,  # type: ignore[arg-type]
+        id="no-fd-adapter",
+        marks=pytest.mark.skip(
+            reason="set CANABLE_FD_SERIAL to register an FD reference"
+        ),
+    ),
+)
+CLASSIC_RATE_PARAMS = tuple(
+    pytest.param(
+        adapter,
+        rate,
+        id=f"{adapter.name}-{rate // 1000}k",
+    )
+    for adapter in REFERENCE_ADAPTERS
+    for rate in adapter.classic_bitrates
+)
 
 
 def pytest_collection_modifyitems(config: Any, items: List[Any]) -> None:
@@ -93,38 +216,48 @@ def _close_open_candle_devices() -> None:
 
 
 def _open_bus(options: dict[str, Any], label: str) -> can.BusABC:
-    """Open a bus, skipping with an actionable message for environment errors."""
+    """Open a bus, skipping with an actionable message for environment errors.
+
+    Args:
+        options: Keyword arguments for :func:`can.Bus`.
+        label: Human-readable adapter name used in messages. ``"canable"``
+            identifies the device under test; all other labels are references.
+
+    Returns:
+        The opened bus.
+
+    Raises:
+        Exception: Re-raises initialization errors for the device under test.
+    """
     try:
         return can.Bus(**options)
     except (can.CanInitializationError, RuntimeError) as exc:
-        if label == "reference":
+        if options.get("interface") == "candle":
             _close_open_candle_devices()
         if _permission_denied(exc):
             pytest.skip(
                 f"raw USB access denied for {label}; install udev/99-canable.rules "
                 "and replug, or run with sudo"
             )
-        if label == "reference":
-            pytest.skip(f"reference adapter is unavailable: {exc}")
+        if label != "canable":
+            pytest.skip(f"{label} adapter is unavailable: {exc}")
         raise
 
 
 @contextmanager
-def _candle_timing_override(target_bitrate: int) -> Iterator[None]:
-    """Let python-can-candle configure classic rates below 100 kbit/s.
-
-    ``can.BitTiming.from_sample_point`` limits BRP to 64, which makes 10/20/50
-    kbit/s impossible with the reference adapter's 48 MHz clock. The firmware
-    accepts larger prescalers, so this context supplies an equivalent 8-TQ
-    timing while the candle bus is being constructed.
+def _reference_timing_override(
+    adapter: ReferenceAdapter, target_bitrate: int
+) -> Iterator[None]:
+    """Apply adapter-specific timing workarounds while a bus is constructed.
 
     Args:
+        adapter: Reference adapter being opened.
         target_bitrate: Requested nominal bitrate in bit/s.
 
     Yields:
         ``None`` while the temporary timing override is active.
     """
-    prescaler = _CANDLE_LOW_BITRATE_PRESCALERS.get(target_bitrate)
+    prescaler = adapter.low_bitrate_prescalers.get(target_bitrate)
     if prescaler is None:
         yield
         return
@@ -135,7 +268,7 @@ def _candle_timing_override(target_bitrate: int) -> Iterator[None]:
         f_clock: int, bitrate: int, sample_point: float = 69.0
     ) -> Any:
         """Return the 8-TQ timing for an otherwise unavailable low bitrate."""
-        if f_clock == 48_000_000 and bitrate == target_bitrate:
+        if bitrate == target_bitrate:
             return SimpleNamespace(
                 tseg1=6,
                 tseg2=1,
@@ -172,12 +305,6 @@ def close_bus(bus: can.BusABC) -> None:
 def canable_serial() -> str:
     """Return the serial number of the CANable board under test."""
     return os.environ.get("CANABLE_SERIAL", DEFAULT_CANABLE_SERIAL)
-
-
-@pytest.fixture(scope="session")
-def candle_serial() -> str:
-    """Return the serial number of the candle reference adapter."""
-    return os.environ.get("CANDLE_SERIAL", DEFAULT_CANDLE_SERIAL)
 
 
 @pytest.fixture(scope="session")
@@ -219,21 +346,16 @@ def canable_bus_factory(
 
 @pytest.fixture
 def reference_bus_factory(
-    candle_serial: str, bitrate: int
+    bitrate: int,
 ) -> Iterator[Callable[..., can.BusABC]]:
-    """Provide a factory that opens the reference through ``interface="candle"``."""
+    """Provide a factory that opens any registered reference adapter."""
     buses: List[can.BusABC] = []
 
-    def factory(**overrides: Any) -> can.BusABC:
-        options: dict[str, Any] = {
-            "interface": "candle",
-            "channel": f"{candle_serial}:0",
-            "bitrate": bitrate,
-            "ignore_config": True,
-        }
+    def factory(adapter: ReferenceAdapter, **overrides: Any) -> can.BusABC:
+        options = adapter.bus_options(bitrate)
         options.update(overrides)
-        with _candle_timing_override(int(options.get("bitrate", bitrate))):
-            bus = _open_bus(options, "reference")
+        with _reference_timing_override(adapter, int(options["bitrate"])):
+            bus = _open_bus(options, adapter.name)
         buses.append(bus)
         return bus
 

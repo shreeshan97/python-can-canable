@@ -73,7 +73,11 @@ object. Direct `CanableBus(...)` construction is never used in hardware tests.
 | --- | --- | --- |
 | `CANABLE_HW` | unset | Must be `1` to run any hardware test. |
 | `CANABLE_SERIAL` | `209D3889594550052` | CanableDevBoard FDCAN under test. |
-| `CANDLE_SERIAL` | `003500465446571320343032` | Reference adapter for `interface="candle"`. |
+| `CANDLE_SERIAL` | `003500465446571320343032` | FYSETC UCAN classic reference adapter. |
+| `CANABLE_FD_SERIAL` | unset | Serial of an optional FD-capable reference adapter; enables FD tests. |
+| `CANABLE_FD_INTERFACE` | `candle` | python-can interface for the optional FD reference. |
+| `CANABLE_FD_DATA_BITRATE` | `2000000` | FD data-phase bitrate for the optional reference. |
+| `CANABLE_FD_BITRATES` | all popular rates | Comma-separated classic rates for the optional FD reference. |
 | `CANABLE_BITRATE` | `500000` | Nominal bitrate for both adapters. |
 | `CANABLE_TIMEOUT` | `2.0` | Receive timeout in seconds. |
 
@@ -95,13 +99,15 @@ done
 | --- | --- |
 | `test_hw_identity.py` | `can.detect_available_configs("canable")` lists the board; `get_device_version()`, `get_capabilities()`, `get_capabilities_fd()`, `get_board_info()`; board name starts with `CanableDevBoard`; capability flag is present; clock is 160 MHz. |
 | `test_hw_loopback.py` | Classic send/receive via plugin with `receive_own_messages=True`; 11-bit and 29-bit IDs; DLC 0 and 8; remote frame; zero error frames. |
-| `test_hw_reference.py` | Adapter↔adapter both directions using `interface="candle"` for the reference. Receiver thread starts before sender, ignores/counts error frames, asserts ID/payload match. A bitrate matrix covers 10, 20, 50, 100, 125, 250, 500, 800 and 1000 kbit/s. A `stress` marker runs 20 alternating iterations with unique IDs. |
-| `test_hw_runtime.py` | Bitrate changes 500000 → 250000 → 500000 with frame checks at each step; acceptance filters; read-only pin status. CAN FD transfer is intentionally excluded because the FYSETC UCAN reference is classic-only. |
+| `test_hw_reference.py` | Adapter↔adapter both directions for every registered reference adapter. Receiver thread starts before sender, ignores/counts error frames, asserts ID/payload match. A per-adapter bitrate matrix covers 10, 20, 50, 100, 125, 250, 500, 800 and 1000 kbit/s. A `stress` marker runs 20 alternating iterations with unique IDs. |
+| `test_hw_runtime.py` | Bitrate changes 500000 → 250000 → 500000 with frame checks at each step; acceptance filters; read-only pin status. Runs once per registered reference adapter. |
+| `test_hw_fd.py` | CAN FD transfer in both directions with 16- and 64-byte payloads. Skips until an FD-capable reference is registered with `CANABLE_FD_SERIAL`; also verifies the target firmware advertises FD capability. |
 | `test_hw_shutdown.py` | Idempotent shutdown and clean kernel-driver state via `bus.kernel_driver_restored`. |
 
-### Reference adapter
+### Reference adapter registry
 
-`python-can-candle` is used as the known-working reference:
+Reference adapters are declared in `tests/hardware/conftest.py`. The FYSETC UCAN is the
+registered classic reference and uses `python-can-candle`:
 
 ```python
 reference = can.Bus(
@@ -115,6 +121,20 @@ reference = can.Bus(
 Pass `bitrate` explicitly: candle defaults to 1 MHz. Select by serial because both adapters
 share VID/PID. A SocketCAN variant is not part of this suite; the earlier SocketCAN baseline
 remains documented in the board bring-up repository.
+
+To add a future FD-capable reference without changing test code, set:
+
+```sh
+CANABLE_FD_SERIAL=<serial> \
+CANABLE_FD_INTERFACE=candle \
+CANABLE_FD_DATA_BITRATE=2000000 \
+CANABLE_FD_BITRATES=100000,125000,250000,500000,1000000 \
+CANABLE_HW=1 pytest tests/hardware -q
+```
+
+The optional adapter joins `REFERENCE_ADAPTERS` for classic transfer/runtime tests and
+`FD_REFERENCE_ADAPTERS` for `tests/hardware/test_hw_fd.py`. If `CANABLE_FD_SERIAL` is unset,
+FD tests skip with an actionable reason.
 
 `python-can-candle` uses `can.BitTiming.from_sample_point`, whose BRP limit of 64 cannot
 express 10/20/50 kbit/s from the reference adapter's 48 MHz clock. The hardware suite applies
