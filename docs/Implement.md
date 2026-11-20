@@ -304,8 +304,9 @@ Unit and live-hardware tests are separate suites; see [Testing.md](Testing.md).
 
 - Unit tests: frame packing/unpacking, struct parsing, feedback codes, bit timing for
   48 MHz and 160 MHz, device selection, init sequence, detection, and buffer/blob handling.
-- Live tests: identity, loopback, adapter↔adapter through `interface="candle"`, runtime
-  bitrate changes, FD if supported, and clean driver reattachment.
+- Live tests: identity, loopback, adapter↔adapter through `interface="candle"`, a popular
+  classic-bitrate matrix, runtime bitrate changes, filters, and clean driver reattachment.
+  CAN FD transfer is not exercised because the FYSETC reference adapter is classic-only.
 
 ## Acceptance criteria
 
@@ -313,7 +314,8 @@ Unit and live-hardware tests are separate suites; see [Testing.md](Testing.md).
 - Only the Elmü 2.5 protocol is used; no legacy 80-byte frame path.
 - Product/board identity and 160 MHz clock are read from firmware.
 - Bitrate and FD data bitrate can be changed programmatically.
-- Frame delivery passes adapter↔adapter against the `python-can-candle` reference.
+- Frame delivery passes adapter↔adapter against the `python-can-candle` reference at all
+  popular classic bitrates from 10 kbit/s to 1 Mbit/s.
 - Unit tests pass without hardware.
 - Docs explain permissions, kernel-driver detachment, and the `lsusb` generic-name caveat.
 - Changes are committed locally; nothing is pushed.

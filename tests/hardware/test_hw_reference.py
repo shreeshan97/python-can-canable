@@ -7,9 +7,49 @@ from typing import Callable
 import can
 import pytest
 
-from conftest import transfer
+from conftest import POPULAR_BITRATES, close_bus, transfer
 
 pytestmark = pytest.mark.hardware
+
+
+@pytest.mark.parametrize(
+    "rate",
+    [pytest.param(rate, id=f"{rate // 1000}k") for rate in POPULAR_BITRATES],
+)
+def test_all_popular_bitrates(
+    canable_bus_factory: Callable[..., can.BusABC],
+    reference_bus_factory: Callable[..., can.BusABC],
+    timeout: float,
+    rate: int,
+) -> None:
+    """Frames pass in both directions at every popular classic bitrate."""
+    target = canable_bus_factory(bitrate=rate)
+    reference = reference_bus_factory(bitrate=rate)
+    base_id = 0x700 + POPULAR_BITRATES.index(rate)
+    try:
+        transfer(
+            target,
+            reference,
+            can.Message(
+                arbitration_id=base_id,
+                data=b"to-ref",
+                is_extended_id=False,
+            ),
+            timeout,
+        )
+        transfer(
+            reference,
+            target,
+            can.Message(
+                arbitration_id=base_id + 1,
+                data=b"to-can",
+                is_extended_id=False,
+            ),
+            timeout,
+        )
+        assert target.error_frame_count == 0
+    finally:
+        close_bus(reference)
 
 
 def test_reference_both_directions(

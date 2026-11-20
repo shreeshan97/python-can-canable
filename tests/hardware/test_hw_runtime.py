@@ -7,7 +7,6 @@ from typing import Callable
 import can
 import pytest
 
-from canable.protocol import DeviceFlags
 from conftest import close_bus, transfer
 
 pytestmark = pytest.mark.hardware
@@ -67,44 +66,6 @@ def test_acceptance_filters(
         )
         target.clear_filters()
         transfer(reference, target, _message(0x124, b"unblock"), timeout)
-    finally:
-        close_bus(reference)
-
-
-def test_fd_send_receive_if_supported(
-    canable_bus_factory: Callable[..., can.BusABC],
-    reference_bus_factory: Callable[..., can.BusABC],
-    timeout: float,
-) -> None:
-    """CAN FD frames pass when both adapters support the requested timing."""
-    try:
-        target = canable_bus_factory(fd=True, data_bitrate=2_000_000)
-    except can.CanError as exc:
-        pytest.skip(f"CANable FD timing is unavailable: {exc}")
-
-    nominal, data = target.get_capabilities_fd()
-    if not (
-        nominal.feature & int(DeviceFlags.CAN_FD)
-        and data.feature & int(DeviceFlags.BIT_TIMING_FD)
-    ):
-        pytest.skip("firmware does not advertise CAN FD with data bit timing")
-
-    reference = reference_bus_factory(fd=True, data_bitrate=2_000_000)
-    message = can.Message(
-        arbitration_id=0x600,
-        data=bytes(range(16)),
-        is_extended_id=False,
-        is_fd=True,
-        bitrate_switch=True,
-    )
-    try:
-        supports_fd = any(
-            getattr(getattr(channel, "feature", None), "fd", False)
-            for channel in reference._channels.values()
-        )
-        if not supports_fd:
-            pytest.skip("reference adapter does not support CAN FD")
-        transfer(target, reference, message, timeout)
     finally:
         close_bus(reference)
 
