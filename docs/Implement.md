@@ -45,7 +45,7 @@ Reference adapter (not supported by this plugin):
 
 ## Reference sources
 
-The original temporary checkout `/tmp/elmue-canable` is not required. Use the public mirror:
+Use the public firmware mirror:
 
 ```text
 https://github.com/Elmue/CANable-2.5-firmware-Slcan-and-Candlelight
@@ -103,6 +103,7 @@ tests/
     test_hw_loopback.py
     test_hw_reference.py
     test_hw_runtime.py
+    test_hw_fd.py
     test_hw_shutdown.py
 examples/
   list_devices.py
@@ -147,6 +148,7 @@ testpaths = ["tests/unit"]
 markers = [
   "hardware: live-hardware test (not collected by default)",
   "stress: repeated alternating frames (opt-in)",
+  "fd: CAN FD transfer test (requires an FD-capable reference adapter)",
 ]
 ```
 
@@ -186,17 +188,17 @@ Constructor parameters to support:
 - `channel`: `"SERIAL:INDEX"` primary form; also accept plain serial when channel 0 is intended.
 - `bitrate`: nominal CAN bitrate, default `500000`.
 - `sample_point`: nominal sample point percent, default `87.5`.
-- `fd`: enable CAN FD; requires `data_bitrate`.
+- `fd`: enable CAN FD; `data_bitrate` defaults to 2 Mbit/s when omitted.
 - `data_bitrate`, `data_sample_point`.
 - `listen_only`, `loop_back`, `one_shot`, `timestamps`, `send_blobs`.
 - `serial_number`, `product`, `manufacturer`, `vid`, `pid`, `bus`, `address`, `index`.
-- `receive_own_messages`: software echo of sent frames when hardware echo is disabled.
+- `receive_own_messages`: request a firmware echo marker and return sent frames via `recv()`.
 - `can_filters`, `ignore_config=True` (recommended).
 
 Public methods:
 
-- `set_bitrate(bitrate, sample_point=87.5)`
-- `set_data_bitrate(data_bitrate, sample_point=87.5)`
+- `set_bitrate(bitrate, sample_point=None)`
+- `set_data_bitrate(data_bitrate, sample_point=None)`
 - `get_capabilities()`, `get_capabilities_fd()`
 - `get_device_version()`, `get_board_info()`
 - `get_error_state()`, `get_last_error()`
@@ -217,7 +219,7 @@ Module-level:
 from canable import list_devices
 
 for dev in list_devices():
-    print(dev.serial_number, dev.product, dev.board_name)
+    print(dev.serial_number, dev.product, dev.manufacturer)
 ```
 
 ## USB / protocol details
@@ -229,8 +231,8 @@ Full details are in [Protocol.md](Protocol.md). Summary:
 - Control transfers use `bmRequestType` `0x41` (OUT) / `0xC1` (IN), `wValue = channel index`,
   `wIndex = 0`.
 - After every OUT control request, call `ELM_ReqGetLastError` and require `FBK_Success = 2`;
-  otherwise raise a descriptive `CanInitializationError` or `CanOperationError`. The firmware
-  cannot stall EP0 in the OUT-data stage.
+  otherwise raise a descriptive `CanableInitializationError` or `CanableOperationError`.
+  The firmware cannot stall EP0 in the OUT-data stage.
 - `ELM_DevFlagProtocolElmue` is included in both the reset and start device-mode commands.
   It stays enabled until all channels are closed.
 - Only the Elmü frame types (`MSG_TxFrame`, `MSG_TxEcho`, `MSG_RxFrame`, `MSG_Error`,

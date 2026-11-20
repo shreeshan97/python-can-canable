@@ -41,10 +41,10 @@ USB calls occur.
 
 | File | Coverage |
 | --- | --- |
-| `test_protocol.py` | Packed struct sizes/fields, feedback codes, device flags, CAN ID/frame flags, TX/RX/echo/error/string/busload/blob frames, malformed sizes, timestamp rollover. |
+| `test_protocol.py` | Packed struct sizes/fields, feedback codes, device flags, CAN ID/frame flags, TX/RX/echo/error/string/busload/blob frames, and malformed sizes. |
 | `test_bit_timing.py` | `BitTiming`/`BitTimingFd` selection for 48 MHz and 160 MHz, classic and FD, capability limits, SJW bounds, deterministic tie-breaking, invalid candidates. |
 | `test_device_selection.py` | `SERIAL:INDEX` parsing, plain serial, selector precedence, invalid index, matching by serial/product/manufacturer/vid/pid/bus/address. |
-| `test_bus_unit.py` | Initialization call order, last-error checks after every OUT request, flag composition, runtime bitrate state machine, filter conversion, receive buffer/blob handling, idempotent shutdown. |
+| `test_bus_unit.py` | Initialization call order, last-error checks after every OUT request, flag composition, runtime bitrate state machine, filter conversion, receive buffer/blob handling, timestamp rollover, serialized USB reads, idempotent shutdown. |
 | `test_detection.py` | `CanableBus._detect_available_configs()` and `can.detect_available_configs("canable")` channel format via monkeypatch. |
 
 Unit-test vectors come from the Elmü Python sample in the firmware mirror, not from guesses.
@@ -100,7 +100,7 @@ done
 | `test_hw_identity.py` | `can.detect_available_configs("canable")` lists the board; `get_device_version()`, `get_capabilities()`, `get_capabilities_fd()`, `get_board_info()`; board name starts with `CanableDevBoard`; capability flag is present; clock is 160 MHz. |
 | `test_hw_loopback.py` | Classic send/receive via plugin with `receive_own_messages=True`; 11-bit and 29-bit IDs; DLC 0 and 8; remote frame; zero error frames. |
 | `test_hw_reference.py` | Adapter↔adapter both directions for every registered reference adapter. Receiver thread starts before sender, ignores/counts error frames, asserts ID/payload match. A per-adapter bitrate matrix covers 10, 20, 50, 100, 125, 250, 500, 800 and 1000 kbit/s. A `stress` marker runs 20 alternating iterations with unique IDs. |
-| `test_hw_runtime.py` | Bitrate changes 500000 → 250000 → 500000 with frame checks at each step; acceptance filters; read-only pin status. Runs once per registered reference adapter. |
+| `test_hw_runtime.py` | Bitrate changes from `CANABLE_BITRATE` → 250000 → `CANABLE_BITRATE` with frame checks at each step; acceptance filters; read-only pin status. Runs once per registered reference adapter. |
 | `test_hw_fd.py` | CAN FD transfer in both directions with 16- and 64-byte payloads. Skips until an FD-capable reference is registered with `CANABLE_FD_SERIAL`; also verifies the target firmware advertises FD capability. |
 | `test_hw_shutdown.py` | Idempotent shutdown and clean kernel-driver state via `bus.kernel_driver_restored`. |
 

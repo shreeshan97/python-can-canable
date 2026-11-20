@@ -8,7 +8,7 @@ import threading
 import time
 from collections import deque
 from copy import copy
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import can
 
@@ -35,9 +35,12 @@ from .protocol import (
     MessageType,
     PinID,
     PinOperation,
+    PID,
     Request,
+    VID,
     ErrorState,
-    iter_blob_frames,
+    _decode_rx_frame,
+    _iter_blob_subframes,
     pack_bit_timing,
     pack_device_mode,
     pack_filter,
@@ -47,7 +50,6 @@ from .protocol import (
     parse_busload_frame,
     parse_echo_frame,
     parse_error_frame,
-    parse_rx_frame,
     parse_string_frame,
     unpack_board_info,
     unpack_capability_classic,
@@ -63,6 +65,8 @@ LOG = logging.getLogger(__name__)
 
 _TIMESTAMP_ROLLOVER_US = 3_600_000_000
 _TIMESTAMP_SLOP_US = 1_000_000
+_ECHO_TTL_S = 10.0
+_BUFFER_COMPACT_THRESHOLD = 4096
 
 
 class CanableBus(can.BusABC):
@@ -128,8 +132,8 @@ class CanableBus(can.BusABC):
         serial_number: Optional[str] = None,
         product: Optional[str] = None,
         manufacturer: Optional[str] = None,
-        vid: int = 0x1D50,
-        pid: int = 0x606F,
+        vid: int = VID,
+        pid: int = PID,
         bus: Optional[int] = None,
         address: Optional[int] = None,
         index: Optional[int] = None,
@@ -141,11 +145,13 @@ class CanableBus(can.BusABC):
         """Initialize device selection state and open the selected adapter."""
         self._device: Optional[CanableUsbDevice] = None
         self._buffer = bytearray()
+        self._buffer_offset = 0
         self._message_queue: Deque[can.Message] = deque()
-        self._pending_echoes: Dict[int, can.Message] = {}
+        self._pending_echoes: Dict[int, Tuple[float, can.Message]] = {}
         self._next_marker = 1
         self._filters: Optional[List[dict[str, Any]]] = None
         self._lock = threading.RLock()
+        self._read_lock = threading.Lock()
         self._channel_started = False
         self._shutdown_done = False
         self._receive_own_messages = bool(receive_own_messages)
@@ -297,7 +303,7 @@ class CanableBus(can.BusABC):
                 self._capabilities_fd = unpack_capability_fd(
                     device.ctrl_in(Request.GET_CAPABILITIES_FD, 72)
                 )
-            except CanableOperationError as exc:
+            except (CanableOperationError, ValueError) as exc:
                 LOG.debug("device did not return FD capabilities: %s", exc)
                 self._capabilities_fd = None
             self._board_info = unpack_board_info(
@@ -317,54 +323,116 @@ class CanableBus(can.BusABC):
                 self._device_flags |= DeviceFlags.GET_ERROR_STATE
 
             self._compute_timings()
-            self._send_timing()
-            self._program_filters()
-            device.ctrl_out(
-                Request.SET_DEVICE_MODE,
-                pack_device_mode(
-                    DeviceMode.START,
-                    self._device_flags | DeviceFlags.PROTOCOL_ELMUE,
-                ),
-            )
-            self._channel_started = True
+            self._configure_channel(reset=False)
         except CanableInitializationError:
             raise
         except Exception as exc:
             raise CanableInitializationError(f"cannot initialize CANable device: {exc}") from exc
 
-    def _compute_timings(self) -> None:
-        """Compute firmware timing values from current settings and capabilities.
+    def _select_timings(
+        self,
+        bitrate: Optional[int] = None,
+        sample_point: Optional[float] = None,
+        data_bitrate: Optional[int] = None,
+        data_sample_point: Optional[float] = None,
+    ) -> Tuple[Any, Optional[Any]]:
+        """Compute timings from settings without mutating the bus.
+
+        Args:
+            bitrate: Optional nominal bitrate override.
+            sample_point: Optional nominal sample-point override.
+            data_bitrate: Optional FD data-bitrate override.
+            data_sample_point: Optional FD data sample-point override.
 
         Returns:
-            ``None``.
+            A ``(nominal, data)`` timing pair; ``data`` is ``None`` in classic mode.
 
         Raises:
             CanableInitializationError: If no compatible timing is available.
         """
+        nominal_rate = self._bitrate if bitrate is None else int(bitrate)
+        nominal_point = self._sample_point if sample_point is None else float(sample_point)
+        data_rate = self._data_bitrate if data_bitrate is None else int(data_bitrate)
+        data_point = (
+            self._data_sample_point
+            if data_sample_point is None
+            else float(data_sample_point)
+        )
         capability = self._require_capability()
-        if self._fd:
-            if self._capabilities_fd is None:
-                raise CanableInitializationError("device does not support CAN FD")
-            nominal, data = self._capabilities_fd
-            try:
-                self._nominal_timing, self._data_timing = select_fd_timing(
-                    self._bitrate,
-                    self._sample_point,
-                    self._data_bitrate,
-                    self._data_sample_point,
-                    nominal,
-                    data,
+        try:
+            if self._fd:
+                if self._capabilities_fd is None:
+                    raise CanableInitializationError("device does not support CAN FD")
+                nominal, data = self._capabilities_fd
+                return select_fd_timing(
+                    nominal_rate, nominal_point, data_rate, data_point, nominal, data
                 )
-            except ValueError as exc:
-                raise CanableInitializationError(str(exc)) from exc
-        else:
-            try:
-                self._nominal_timing = select_classic_timing(
-                    self._bitrate, self._sample_point, capability
-                )
-            except ValueError as exc:
-                raise CanableInitializationError(str(exc)) from exc
-            self._data_timing = None
+            return (
+                select_classic_timing(nominal_rate, nominal_point, capability),
+                None,
+            )
+        except ValueError as exc:
+            raise CanableInitializationError(str(exc)) from exc
+
+    def _compute_timings(self) -> None:
+        """Cache firmware timing values computed from the current settings."""
+        self._nominal_timing, self._data_timing = self._select_timings()
+
+    def _apply_settings(
+        self,
+        *,
+        bitrate: Optional[int] = None,
+        sample_point: Optional[float] = None,
+        data_bitrate: Optional[int] = None,
+        data_sample_point: Optional[float] = None,
+    ) -> None:
+        """Compute, apply, and activate new timing settings atomically.
+
+        Args:
+            bitrate: Optional nominal bitrate override.
+            sample_point: Optional nominal sample-point override.
+            data_bitrate: Optional FD data-bitrate override.
+            data_sample_point: Optional FD data sample-point override.
+
+        Raises:
+            CanableOperationError: If timing computation or activation fails.
+        """
+        try:
+            nominal, data = self._select_timings(
+                bitrate, sample_point, data_bitrate, data_sample_point
+            )
+        except CanableInitializationError as exc:
+            raise CanableOperationError(str(exc)) from exc
+
+        previous = (
+            self._bitrate,
+            self._sample_point,
+            self._data_bitrate,
+            self._data_sample_point,
+            self._nominal_timing,
+            self._data_timing,
+        )
+        if bitrate is not None:
+            self._bitrate = int(bitrate)
+        if sample_point is not None:
+            self._sample_point = float(sample_point)
+        if data_bitrate is not None:
+            self._data_bitrate = int(data_bitrate)
+        if data_sample_point is not None:
+            self._data_sample_point = float(data_sample_point)
+        self._nominal_timing, self._data_timing = nominal, data
+        try:
+            self._restart_channel()
+        except Exception:
+            (
+                self._bitrate,
+                self._sample_point,
+                self._data_bitrate,
+                self._data_sample_point,
+                self._nominal_timing,
+                self._data_timing,
+            ) = previous
+            raise
 
     def _send_timing(self) -> None:
         """Send cached nominal and optional data-phase timing to the firmware."""
@@ -401,15 +469,19 @@ class CanableBus(can.BusABC):
                     pack_filter(operation, can_id & mask_width, can_mask & mask_width),
                 )
 
-    def _restart_channel(self) -> None:
-        """Stop, reprogram, and restart the CAN channel."""
+    def _configure_channel(self, *, reset: bool = True) -> None:
+        """Program timing and filters, then start the CAN channel.
+
+        Args:
+            reset: Send a RESET command first. Initialization already resets the
+                device before reading capabilities, so it skips this step.
+        """
         device = self._require_device()
-        if not device.is_open:
-            return
-        device.ctrl_out(
-            Request.SET_DEVICE_MODE,
-            pack_device_mode(DeviceMode.RESET, DeviceFlags.PROTOCOL_ELMUE),
-        )
+        if reset:
+            device.ctrl_out(
+                Request.SET_DEVICE_MODE,
+                pack_device_mode(DeviceMode.RESET, DeviceFlags.PROTOCOL_ELMUE),
+            )
         self._channel_started = False
         self._send_timing()
         self._program_filters()
@@ -422,6 +494,12 @@ class CanableBus(can.BusABC):
         )
         self._channel_started = True
 
+    def _restart_channel(self) -> None:
+        """Stop, reprogram, and restart the CAN channel."""
+        if not self._require_device().is_open:
+            return
+        self._configure_channel()
+
     def _require_device(self) -> CanableUsbDevice:
         """Return the open USB transport or raise."""
         if self._device is None:
@@ -433,6 +511,23 @@ class CanableBus(can.BusABC):
         if self._capabilities is None:
             raise CanableOperationError("device capabilities have not been read")
         return self._capabilities
+
+    def _prune_pending_echoes(self, now: Optional[float] = None) -> None:
+        """Drop echo entries older than the configured TTL.
+
+        The caller must hold :attr:`_lock`.
+
+        Args:
+            now: Current monotonic time; fetched when omitted.
+        """
+        current = time.monotonic() if now is None else now
+        stale = [
+            marker
+            for marker, (created, _message) in self._pending_echoes.items()
+            if current - created > _ECHO_TTL_S
+        ]
+        for marker in stale:
+            self._pending_echoes.pop(marker, None)
 
     def send(self, msg: can.Message, timeout: Optional[float] = None) -> None:
         """Transmit one CAN frame.
@@ -453,12 +548,14 @@ class CanableBus(can.BusABC):
         marker = 0
         if self._receive_own_messages:
             with self._lock:
+                now = time.monotonic()
+                self._prune_pending_echoes(now)
                 marker = self._next_marker
                 self._next_marker = marker % 0xFF + 1
                 echo = copy(msg)
                 echo.is_rx = True
                 echo.channel = self.channel
-                self._pending_echoes[marker] = echo
+                self._pending_echoes[marker] = (now, echo)
         try:
             self._require_device().write(pack_tx_frame(msg, marker=marker))
         except Exception:
@@ -484,18 +581,22 @@ class CanableBus(can.BusABC):
                 if self._message_queue:
                     return self._message_queue.popleft(), False
 
-            remaining_ms = None
-            if deadline is not None:
-                remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
-                if remaining_ms == 0:
-                    return None, False
-            chunk = self._require_device().read(
-                MAX_BLOB_SIZE, timeout_ms=remaining_ms
-            )
-            if chunk:
+            with self._read_lock:
                 with self._lock:
-                    self._buffer.extend(chunk)
-                    self._process_buffer()
+                    if self._message_queue:
+                        return self._message_queue.popleft(), False
+                remaining_ms = None
+                if deadline is not None:
+                    remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+                    if remaining_ms == 0:
+                        return None, False
+                chunk = self._require_device().read(
+                    MAX_BLOB_SIZE, timeout_ms=remaining_ms
+                )
+                if chunk:
+                    with self._lock:
+                        self._buffer.extend(chunk)
+                        self._process_buffer()
 
     def _process_buffer(self) -> None:
         """Parse complete Elmü messages from the USB receive buffer.
@@ -503,24 +604,41 @@ class CanableBus(can.BusABC):
         Returns:
             ``None``.
         """
-        while len(self._buffer) >= 2:
-            size = self._buffer[0]
+        buffer = self._buffer
+        offset = self._buffer_offset
+        available = len(buffer) - offset
+        while available >= 2:
+            size = buffer[offset]
             if size < 2:
                 LOG.warning("discarding invalid message size %d", size)
-                del self._buffer[0]
+                offset += 1
+                available -= 1
                 continue
-            if len(self._buffer) < size:
-                return
-            raw = bytes(self._buffer[:size])
-            del self._buffer[:size]
+            if available < size:
+                break
+            raw = bytes(buffer[offset : offset + size])
+            offset += size
+            available -= size
             self._handle_message(raw)
 
-    def _handle_message(self, raw: bytes) -> None:
+        if offset == len(buffer):
+            buffer.clear()
+            offset = 0
+        elif offset >= _BUFFER_COMPACT_THRESHOLD:
+            del buffer[:offset]
+            offset = 0
+        self._buffer_offset = offset
+
+    def _handle_message(self, raw: bytes, depth: int = 0) -> None:
         """Dispatch one complete Elmü message.
 
         Args:
             raw: Complete message including its two-byte header.
+            depth: Current blob expansion depth, used to bound recursion.
         """
+        if depth > 2:
+            LOG.warning("ignoring nested Elmü blob at depth %d", depth)
+            return
         try:
             msg_type = MessageType(raw[1])
         except ValueError:
@@ -529,11 +647,11 @@ class CanableBus(can.BusABC):
 
         try:
             if msg_type == MessageType.RX_FRAME:
-                message = parse_rx_frame(raw, self._timestamps, self.channel)
-                if self._timestamps and message.timestamp:
-                    message.timestamp = self._adjust_timestamp(
-                        int(round(message.timestamp * 1_000_000))
-                    )
+                message, timestamp_us = _decode_rx_frame(
+                    raw, self._timestamps, self.channel
+                )
+                if timestamp_us is not None:
+                    message.timestamp = self._adjust_timestamp(timestamp_us)
                 self._message_queue.append(message)
             elif msg_type == MessageType.TX_ECHO:
                 marker, timestamp_us = parse_echo_frame(raw, self._timestamps)
@@ -553,18 +671,19 @@ class CanableBus(can.BusABC):
             elif msg_type == MessageType.BUSLOAD:
                 self.busload_percent = parse_busload_frame(raw)
             elif msg_type in (MessageType.RX_BLOB, MessageType.TX_BLOB):
-                self._handle_blob(raw, msg_type)
+                self._handle_blob(raw, msg_type, depth)
             elif msg_type == MessageType.TX_FRAME:
                 LOG.debug("ignoring TX frame received from device")
         except ValueError as exc:
             LOG.warning("malformed Elmü %s message: %s", msg_type.name, exc)
 
-    def _handle_blob(self, raw: bytes, msg_type: MessageType) -> None:
+    def _handle_blob(self, raw: bytes, msg_type: MessageType, depth: int) -> None:
         """Expand a blob message into its subframes.
 
         Args:
             raw: Complete blob message.
             msg_type: Blob message type.
+            depth: Current blob expansion depth.
         """
         try:
             frame_count, inner_type = parse_blob_header(raw)
@@ -572,8 +691,11 @@ class CanableBus(can.BusABC):
             LOG.warning("malformed blob header: %s", exc)
             return
         LOG.debug("received blob with %d frames of type %s", frame_count, inner_type.name)
-        for subframe in iter_blob_frames(raw):
-            self._handle_message(subframe)
+        try:
+            for subframe in _iter_blob_subframes(raw, frame_count):
+                self._handle_message(subframe, depth + 1)
+        except ValueError as exc:
+            LOG.warning("malformed blob payload: %s", exc)
 
     def _handle_echo(self, marker: int, timestamp_us: Optional[int]) -> None:
         """Correlate a TX echo marker with a previously sent message.
@@ -582,10 +704,11 @@ class CanableBus(can.BusABC):
             marker: Echo marker reported by firmware.
             timestamp_us: Optional hardware timestamp in microseconds.
         """
-        message = self._pending_echoes.pop(marker, None)
-        if message is None:
+        entry = self._pending_echoes.pop(marker, None)
+        if entry is None:
             LOG.debug("ignoring unknown TX echo marker %d", marker)
             return
+        _created, message = entry
         if timestamp_us is not None:
             message.timestamp = self._adjust_timestamp(timestamp_us)
         self._message_queue.append(message)
@@ -643,14 +766,7 @@ class CanableBus(can.BusABC):
         """
         if bitrate <= 0:
             raise ValueError("bitrate must be positive")
-        self._bitrate = int(bitrate)
-        if sample_point is not None:
-            self._sample_point = float(sample_point)
-        try:
-            self._compute_timings()
-        except CanableInitializationError as exc:
-            raise CanableOperationError(str(exc)) from exc
-        self._restart_channel()
+        self._apply_settings(bitrate=bitrate, sample_point=sample_point)
 
     def set_data_bitrate(
         self, data_bitrate: int, sample_point: Optional[float] = None
@@ -671,14 +787,7 @@ class CanableBus(can.BusABC):
             raise CanableOperationError("CAN FD is not enabled")
         if data_bitrate <= 0:
             raise ValueError("data_bitrate must be positive")
-        self._data_bitrate = int(data_bitrate)
-        if sample_point is not None:
-            self._data_sample_point = float(sample_point)
-        try:
-            self._compute_timings()
-        except CanableInitializationError as exc:
-            raise CanableOperationError(str(exc)) from exc
-        self._restart_channel()
+        self._apply_settings(data_bitrate=data_bitrate, data_sample_point=sample_point)
 
     def get_capabilities(self) -> Capability:
         """Return the cached classic capability record.

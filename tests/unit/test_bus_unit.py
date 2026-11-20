@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import struct
+import threading
+import time
 
 import can
 import pytest
 
+from canable import bus as bus_module
 from canable import protocol as p
-from canable.exceptions import CanableInitializationError
+from canable.exceptions import (
+    CanableInitializationError,
+    CanableOperationError,
+)
 from conftest import board_info_bytes, capability_bytes
 
 
@@ -55,6 +61,13 @@ def echo_frame(marker: int, timestamp: int | None = None) -> bytes:
     if timestamp is None:
         return struct.pack(p.TX_ECHO_FORMAT, 3, int(p.MessageType.TX_ECHO), marker)
     return struct.pack(p.TX_ECHO_TIMESTAMP_FORMAT, 7, int(p.MessageType.TX_ECHO), marker, timestamp)
+
+
+def blob_message(
+    body: bytes, outer_type: p.MessageType = p.MessageType.RX_BLOB
+) -> bytes:
+    """Wrap a blob body with a common Elmü header."""
+    return struct.pack(p.BLOB_HEADER_FORMAT, len(body) + 2, int(outer_type)) + body
 
 
 def test_initialization_call_order(usb_bus: object) -> None:
@@ -249,3 +262,126 @@ def test_runtime_bitrate_and_shutdown(usb_bus: object) -> None:
     calls_after_shutdown = len(device.ctrl_calls)
     bus.shutdown()
     assert len(device.ctrl_calls) == calls_after_shutdown
+
+
+def test_zero_timestamp_rollover_is_adjusted(usb_bus: object) -> None:
+    """A raw zero-microsecond timestamp still triggers rollover compensation."""
+    bus = make_bus(usb_bus, timestamps=True)
+    device = usb_bus.devices[0]
+    device.queue_in(rx_frame(0x20, b"1", timestamp=3_599_000_000))
+    before = bus.recv(0.2)
+    device.queue_in(rx_frame(0x20, b"2", timestamp=0))
+    after = bus.recv(0.2)
+    assert before is not None and after is not None
+    assert after.timestamp - before.timestamp == pytest.approx(1.0, abs=0.01)
+    bus.shutdown()
+
+
+def test_partial_frame_across_reads(usb_bus: object) -> None:
+    """A frame split across two USB reads is reassembled from the buffer cursor."""
+    bus = make_bus(usb_bus)
+    device = usb_bus.devices[0]
+    frame = rx_frame(0x22, b"split")
+    device.queue_in(frame[:3])
+    assert bus.recv(0.02) is None
+    device.queue_in(frame[3:])
+    received = bus.recv(0.2)
+    assert received is not None
+    assert bytes(received.data) == b"split"
+    bus.shutdown()
+
+
+def test_malformed_and_nested_blobs_are_contained(usb_bus: object) -> None:
+    """Bad blob sizes and excessive nesting never queue a CAN frame."""
+    bus = make_bus(usb_bus)
+    device = usb_bus.devices[0]
+
+    bad = bytearray(blob_message(bytes([1, int(p.MessageType.RX_FRAME)])))
+    bad[0] += 1
+    device.queue_in(bytes(bad))
+    assert bus.recv(0.02) is None
+
+    leaf = rx_frame(0x30, b"leaf")
+    body = bytes([1, int(p.MessageType.RX_FRAME)]) + leaf
+    nested = blob_message(body)
+    for _ in range(3):
+        nested = blob_message(bytes([1, int(p.MessageType.RX_BLOB)]) + nested)
+    device.queue_in(nested)
+    assert bus.recv(0.02) is None
+    bus.shutdown()
+
+
+def test_failed_bitrate_change_preserves_state(
+    usb_bus: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unavailable new timing leaves the previous settings and timing intact."""
+    bus = make_bus(usb_bus)
+    device = usb_bus.devices[0]
+    original_rate = bus._bitrate
+    original_timing = bus._nominal_timing
+    calls_before = len(device.out_requests())
+
+    def no_timing(*_args: object, **_kwargs: object) -> object:
+        raise ValueError("no timing available")
+
+    monkeypatch.setattr(bus_module, "select_classic_timing", no_timing)
+    with pytest.raises(CanableOperationError, match="no timing available"):
+        bus.set_bitrate(123_456)
+
+    assert bus._bitrate == original_rate
+    assert bus._nominal_timing == original_timing
+    assert len(device.out_requests()) == calls_before
+    bus.shutdown()
+
+
+def test_malformed_fd_capability_keeps_classic_mode(usb_bus: object) -> None:
+    """A short FD capability response does not prevent classic initialization."""
+    device = usb_bus.add()
+    device.responses[p.Request.GET_CAPABILITIES_FD] = b"\x00" * 8
+    bus = can.Bus(
+        interface="canable", channel=device.serial_number, ignore_config=True
+    )
+    assert bus.get_capabilities().fclk_can == 160_000_000
+    with pytest.raises(CanableOperationError, match="does not support CAN FD"):
+        bus.get_capabilities_fd()
+    bus.shutdown()
+
+
+def test_concurrent_receives_do_not_overlap_usb_reads(
+    usb_bus: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Concurrent ``recv`` callers are serialized on the bulk IN endpoint."""
+    bus = make_bus(usb_bus)
+    device = usb_bus.devices[0]
+    original_read = device.read
+    active = 0
+    peak = 0
+    guard = threading.Lock()
+
+    def tracked_read(endpoint: int, size: int, timeout: int) -> bytes:
+        nonlocal active, peak
+        with guard:
+            active += 1
+            peak = max(peak, active)
+        try:
+            time.sleep(0.02)
+            return original_read(endpoint, size, timeout)
+        finally:
+            with guard:
+                active -= 1
+
+    monkeypatch.setattr(device, "read", tracked_read)
+    device.queue_in(rx_frame(0x40, b"A") + rx_frame(0x41, b"B"))
+    results: list[can.Message | None] = []
+    threads = [
+        threading.Thread(target=lambda: results.append(bus.recv(1.0))) for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(2.0)
+
+    assert peak == 1
+    assert len(results) == 2
+    assert all(message is not None for message in results)
+    bus.shutdown()

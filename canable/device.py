@@ -42,6 +42,8 @@ __all__ = [
 
 LOG = logging.getLogger(__name__)
 
+_USB_ATTRIBUTE_ERRORS = (AttributeError, NotImplementedError, ValueError, usb.core.USBError)
+
 # Channel 0 is the only channel supported by this driver. The remaining entries
 # encode the firmware's reserved multi-channel endpoint mapping.
 _INTERFACES = (0, 2, 3)
@@ -159,7 +161,7 @@ def _safe_string(device: Any, name: str) -> Optional[str]:
     """Read an optional string descriptor, tolerating unsupported devices."""
     try:
         value = getattr(device, name)
-    except (AttributeError, NotImplementedError, ValueError, usb.core.USBError):
+    except _USB_ATTRIBUTE_ERRORS:
         return None
     if value is None:
         return None
@@ -170,7 +172,7 @@ def _safe_int(device: Any, name: str) -> Optional[int]:
     """Read an optional integer attribute, tolerating unsupported devices."""
     try:
         value = getattr(device, name)
-    except (AttributeError, NotImplementedError, ValueError, usb.core.USBError):
+    except _USB_ATTRIBUTE_ERRORS:
         return None
     return _as_int(value)
 
@@ -179,24 +181,24 @@ def _port_path(device: Any) -> Optional[str]:
     """Build the physical USB port path from ``port_numbers`` or parents."""
     try:
         ports = tuple(getattr(device, "port_numbers") or ())
-    except (AttributeError, NotImplementedError, ValueError, usb.core.USBError):
+    except _USB_ATTRIBUTE_ERRORS:
         ports = ()
     if not ports:
         try:
             parent = getattr(device, "parent", None)
-        except (AttributeError, NotImplementedError, ValueError, usb.core.USBError):
+        except _USB_ATTRIBUTE_ERRORS:
             parent = None
         reversed_ports: List[int] = []
         while parent is not None:
             try:
                 numbers = tuple(getattr(parent, "port_numbers") or ())
-            except (AttributeError, NotImplementedError, ValueError, usb.core.USBError):
+            except _USB_ATTRIBUTE_ERRORS:
                 numbers = ()
             if numbers:
                 reversed_ports.insert(0, int(numbers[-1]))
             try:
                 parent = getattr(parent, "parent", None)
-            except (AttributeError, NotImplementedError, ValueError, usb.core.USBError):
+            except _USB_ATTRIBUTE_ERRORS:
                 parent = None
         ports = tuple(reversed_ports)
     return ".".join(str(int(port)) for port in ports) if ports else None
@@ -361,7 +363,8 @@ class CanableUsbDevice:
 
     Args:
         info: Device metadata returned by :func:`list_devices`.
-        channel: CAN channel index. Only index 0 is supported.
+        channel: CAN channel index. Device selection rejects indices above 0;
+            the constructor still maps the firmware's reserved endpoint table.
         timeout_ms: USB transfer timeout in milliseconds.
 
     Raises:
@@ -568,12 +571,12 @@ class CanableUsbDevice:
         device = self.info.device
         try:
             self._release_interface(device)
-        except (AttributeError, NotImplementedError, ValueError, usb.core.USBError) as exc:
+        except _USB_ATTRIBUTE_ERRORS as exc:
             LOG.debug("could not release interface %d: %s", self.interface, exc)
         if self._kernel_detached:
             try:
                 device.attach_kernel_driver(self.interface)
-            except (AttributeError, NotImplementedError, ValueError, usb.core.USBError) as exc:
+            except _USB_ATTRIBUTE_ERRORS as exc:
                 LOG.warning("could not reattach kernel driver: %s", exc)
             else:
                 self.reattached_kernel_driver = True

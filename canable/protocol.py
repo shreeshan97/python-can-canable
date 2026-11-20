@@ -414,6 +414,29 @@ def feedback_name(code: int) -> str:
         return "UNKNOWN"
 
 
+def _unpack_struct(
+    fmt: str, data: bytes, message: str, *, exact: bool = False
+) -> Tuple[int, ...]:
+    """Unpack a fixed prefix, rejecting short or unexpected-length buffers.
+
+    Args:
+        fmt: ``struct`` format string for the fixed prefix.
+        data: Buffer to decode.
+        message: Error message for an invalid buffer length.
+        exact: Require the buffer to contain no bytes past the prefix.
+
+    Returns:
+        Unpacked field values.
+
+    Raises:
+        ValueError: If the buffer is too short or, with ``exact``, too long.
+    """
+    size = struct.calcsize(fmt)
+    if len(data) < size or (exact and len(data) != size):
+        raise ValueError(message)
+    return struct.unpack(fmt, data[:size])
+
+
 def pack_bit_timing(timing: BitTiming) -> bytes:
     """Pack a ``kBitTiming`` structure.
 
@@ -441,11 +464,6 @@ def pack_device_mode(mode: DeviceMode, flags: int) -> bytes:
     return struct.pack(DEVICE_MODE_FORMAT, int(mode), int(flags))
 
 
-def _decode_limits(values: Tuple[int, ...]) -> TimingLimits:
-    """Decode eight little-endian words into ``TimingLimits``."""
-    return TimingLimits(*values)
-
-
 def unpack_capability_classic(data: bytes) -> Capability:
     """Decode a ``kCapabilityClassic`` response.
 
@@ -458,10 +476,13 @@ def unpack_capability_classic(data: bytes) -> Capability:
     Raises:
         ValueError: If the buffer length is not 40 bytes.
     """
-    if len(data) != struct.calcsize(CAPABILITY_CLASSIC_FORMAT):
-        raise ValueError("classic capability buffer must be 40 bytes")
-    values = struct.unpack(CAPABILITY_CLASSIC_FORMAT, data)
-    return Capability(values[0], values[1], _decode_limits(values[2:]))
+    values = _unpack_struct(
+        CAPABILITY_CLASSIC_FORMAT,
+        data,
+        "classic capability buffer must be 40 bytes",
+        exact=True,
+    )
+    return Capability(values[0], values[1], TimingLimits(*values[2:]))
 
 
 def unpack_capability_fd(data: bytes) -> Tuple[Capability, Capability]:
@@ -477,12 +498,15 @@ def unpack_capability_fd(data: bytes) -> Tuple[Capability, Capability]:
     Raises:
         ValueError: If the buffer length is not 72 bytes.
     """
-    if len(data) != struct.calcsize(CAPABILITY_FD_FORMAT):
-        raise ValueError("FD capability buffer must be 72 bytes")
-    values = struct.unpack(CAPABILITY_FD_FORMAT, data)
+    values = _unpack_struct(
+        CAPABILITY_FD_FORMAT,
+        data,
+        "FD capability buffer must be 72 bytes",
+        exact=True,
+    )
     feature, clock = values[0], values[1]
-    nominal = Capability(feature, clock, _decode_limits(values[2:10]))
-    data_phase = Capability(feature, clock, _decode_limits(values[10:18]))
+    nominal = Capability(feature, clock, TimingLimits(*values[2:10]))
+    data_phase = Capability(feature, clock, TimingLimits(*values[10:18]))
     return nominal, data_phase
 
 
@@ -498,9 +522,14 @@ def unpack_device_version(data: bytes) -> DeviceVersion:
     Raises:
         ValueError: If the buffer length is not 12 bytes.
     """
-    if len(data) != struct.calcsize(DEVICE_VERSION_FORMAT):
-        raise ValueError("device version buffer must be 12 bytes")
-    return DeviceVersion(*struct.unpack(DEVICE_VERSION_FORMAT, data))
+    return DeviceVersion(
+        *_unpack_struct(
+            DEVICE_VERSION_FORMAT,
+            data,
+            "device version buffer must be 12 bytes",
+            exact=True,
+        )
+    )
 
 
 def unpack_error_state(data: bytes) -> ErrorState:
@@ -515,9 +544,14 @@ def unpack_error_state(data: bytes) -> ErrorState:
     Raises:
         ValueError: If the buffer length is not 12 bytes.
     """
-    if len(data) != struct.calcsize(ERROR_STATE_FORMAT):
-        raise ValueError("error state buffer must be 12 bytes")
-    return ErrorState(*struct.unpack(ERROR_STATE_FORMAT, data))
+    return ErrorState(
+        *_unpack_struct(
+            ERROR_STATE_FORMAT,
+            data,
+            "error state buffer must be 12 bytes",
+            exact=True,
+        )
+    )
 
 
 def _decode_string(raw: bytes) -> str:
@@ -537,9 +571,12 @@ def unpack_board_info(data: bytes) -> BoardInfo:
     Raises:
         ValueError: If the buffer length is not 56 bytes.
     """
-    if len(data) != struct.calcsize(BOARD_INFO_FORMAT):
-        raise ValueError("board info buffer must be 56 bytes")
-    mcu_id, mcu_name, board_name, flags = struct.unpack(BOARD_INFO_FORMAT, data)
+    mcu_id, mcu_name, board_name, flags = _unpack_struct(
+        BOARD_INFO_FORMAT,
+        data,
+        "board info buffer must be 56 bytes",
+        exact=True,
+    )
     return BoardInfo(mcu_id, _decode_string(mcu_name), _decode_string(board_name), flags)
 
 
@@ -632,38 +669,28 @@ def pack_tx_frame(message: can.Message, marker: int = 0) -> bytes:
     else:
         payload = bytes(message.data)
 
-    header = struct.pack(HEADER_FORMAT, 8 + len(payload), int(MessageType.TX_FRAME))
-    return header + struct.pack("<BIB", int(flags), can_id, marker) + payload
-
-
-def parse_rx_frame(
-    data: bytes, timestamps_enabled: bool, channel: int = 0
-) -> can.Message:
-    """Decode a device-to-host ``kRxFrameElmue`` message.
-
-    Args:
-        data: Complete message including the 2-byte header.
-        timestamps_enabled: Whether the device includes a 4-byte timestamp.
-        channel: Channel index to attach to the returned message.
-
-    Returns:
-        Decoded CAN message.
-
-    Raises:
-        ValueError: If the message is shorter than its fixed header.
-    """
-    base_size = struct.calcsize(RX_FRAME_TIMESTAMP_FORMAT if timestamps_enabled else RX_FRAME_FORMAT)
-    if len(data) < base_size:
-        raise ValueError("RX frame is shorter than its fixed header")
-
-    if timestamps_enabled:
-        _size, _msg_type, flags, can_id, timestamp_us = struct.unpack(
-            RX_FRAME_TIMESTAMP_FORMAT, data[:base_size]
+    return (
+        struct.pack(
+            TX_FRAME_FORMAT,
+            8 + len(payload),
+            int(MessageType.TX_FRAME),
+            int(flags),
+            can_id,
+            marker,
         )
-    else:
-        _size, _msg_type, flags, can_id = struct.unpack(RX_FRAME_FORMAT, data[:base_size])
-        timestamp_us = None
+        + payload
+    )
 
+
+def _decode_rx_frame(
+    data: bytes, timestamps_enabled: bool, channel: int
+) -> Tuple[can.Message, Optional[int]]:
+    """Decode an RX frame and return its raw microsecond timestamp separately."""
+    fmt = RX_FRAME_TIMESTAMP_FORMAT if timestamps_enabled else RX_FRAME_FORMAT
+    fields = _unpack_struct(fmt, data, "RX frame is shorter than its fixed header")
+    _size, _msg_type, flags, can_id = fields[:4]
+    timestamp_us = fields[4] if timestamps_enabled else None
+    base_size = struct.calcsize(fmt)
     payload = data[base_size:]
     is_extended = bool(can_id & int(CanIdFlags.EXTENDED))
     is_remote = bool(can_id & int(CanIdFlags.RTR))
@@ -691,6 +718,26 @@ def parse_rx_frame(
         data=frame_data,
         channel=channel,
     )
+    return message, timestamp_us
+
+
+def parse_rx_frame(
+    data: bytes, timestamps_enabled: bool, channel: int = 0
+) -> can.Message:
+    """Decode a device-to-host ``kRxFrameElmue`` message.
+
+    Args:
+        data: Complete message including the 2-byte header.
+        timestamps_enabled: Whether the device includes a 4-byte timestamp.
+        channel: Channel index to attach to the returned message.
+
+    Returns:
+        Decoded CAN message with its timestamp expressed in seconds.
+
+    Raises:
+        ValueError: If the message is shorter than its fixed header.
+    """
+    message, timestamp_us = _decode_rx_frame(data, timestamps_enabled, channel)
     if timestamp_us is not None:
         message.timestamp = float(timestamp_us) / 1_000_000.0
     return message
@@ -710,16 +757,12 @@ def parse_echo_frame(data: bytes, timestamps_enabled: bool) -> Tuple[int, Option
         ValueError: If the message is too short.
     """
     if timestamps_enabled:
-        if len(data) < struct.calcsize(TX_ECHO_TIMESTAMP_FORMAT):
-            raise ValueError("TX echo frame is too short")
-        _size, _msg_type, marker, timestamp_us = struct.unpack(
-            TX_ECHO_TIMESTAMP_FORMAT, data[:7]
+        fields = _unpack_struct(
+            TX_ECHO_TIMESTAMP_FORMAT, data, "TX echo frame is too short"
         )
-        return marker, timestamp_us
-    if len(data) < struct.calcsize(TX_ECHO_FORMAT):
-        raise ValueError("TX echo frame is too short")
-    _size, _msg_type, marker = struct.unpack(TX_ECHO_FORMAT, data[:3])
-    return marker, None
+        return fields[2], fields[3]
+    fields = _unpack_struct(TX_ECHO_FORMAT, data, "TX echo frame is too short")
+    return fields[2], None
 
 
 def parse_error_frame(data: bytes, timestamps_enabled: bool) -> Tuple[int, bytes, Optional[int]]:
@@ -735,21 +778,13 @@ def parse_error_frame(data: bytes, timestamps_enabled: bool) -> Tuple[int, bytes
     Raises:
         ValueError: If the message is too short.
     """
-    fixed = struct.calcsize(
-        ERROR_FRAME_TIMESTAMP_FORMAT if timestamps_enabled else ERROR_FRAME_FORMAT
-    )
-    if len(data) < fixed:
-        raise ValueError("error frame is too short")
     if timestamps_enabled:
-        _size, _msg_type, err_id, err_data, timestamp_us = struct.unpack(
-            ERROR_FRAME_TIMESTAMP_FORMAT, data[:fixed]
+        fields = _unpack_struct(
+            ERROR_FRAME_TIMESTAMP_FORMAT, data, "error frame is too short"
         )
-    else:
-        _size, _msg_type, err_id, err_data = struct.unpack(
-            ERROR_FRAME_FORMAT, data[:fixed]
-        )
-        timestamp_us = None
-    return err_id, err_data, timestamp_us
+        return fields[2], fields[3], fields[4]
+    fields = _unpack_struct(ERROR_FRAME_FORMAT, data, "error frame is too short")
+    return fields[2], fields[3], None
 
 
 def parse_busload_frame(data: bytes) -> int:
@@ -764,10 +799,7 @@ def parse_busload_frame(data: bytes) -> int:
     Raises:
         ValueError: If the message is too short.
     """
-    if len(data) < struct.calcsize(BUSLOAD_FORMAT):
-        raise ValueError("busload frame is too short")
-    _size, _msg_type, percent = struct.unpack(BUSLOAD_FORMAT, data[:3])
-    return percent
+    return _unpack_struct(BUSLOAD_FORMAT, data, "busload frame is too short")[2]
 
 
 def parse_string_frame(data: bytes) -> str:
@@ -801,6 +833,21 @@ def parse_blob_header(data: bytes) -> Tuple[int, MessageType]:
     return frame_count, msg_type
 
 
+def _iter_blob_subframes(data: bytes, frame_count: int) -> Iterator[bytes]:
+    """Yield blob subframes when the header has already been decoded."""
+    if not data or data[0] != len(data):
+        raise ValueError("blob declared size does not match the message length")
+    offset = 4
+    for _ in range(frame_count):
+        if offset + 2 > len(data):
+            raise ValueError("blob subframe header is truncated")
+        size = data[offset]
+        if size < 2 or offset + size > len(data):
+            raise ValueError(f"invalid blob subframe size {size} at offset {offset}")
+        yield bytes(data[offset : offset + size])
+        offset += size
+
+
 def iter_blob_frames(data: bytes) -> Iterator[bytes]:
     """Iterate over the subframes packed into a blob message.
 
@@ -814,12 +861,4 @@ def iter_blob_frames(data: bytes) -> Iterator[bytes]:
         ValueError: If the blob header or any subframe size is invalid.
     """
     frame_count, _msg_type = parse_blob_header(data)
-    offset = 4
-    for _ in range(frame_count):
-        if offset + 2 > len(data):
-            raise ValueError("blob subframe header is truncated")
-        size = data[offset]
-        if size < 2 or offset + size > len(data):
-            raise ValueError(f"invalid blob subframe size {size} at offset {offset}")
-        yield bytes(data[offset : offset + size])
-        offset += size
+    yield from _iter_blob_subframes(data, frame_count)

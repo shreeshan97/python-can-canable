@@ -79,11 +79,31 @@ def _from_timing_values(
     )
 
 
-def _from_python_can(timing: can.BitTiming, max_sjw: int) -> BitTiming:
-    """Convert a python-can ``BitTiming`` to a firmware ``kBitTiming``."""
-    return _from_timing_values(
-        timing.brp, timing.tseg1, timing.tseg2, timing.sjw, max_sjw
-    )
+def _python_can_candidates(timing_class: Any, options: Any) -> Iterator[Any]:
+    """Yield timing candidates using whichever python-can API is available.
+
+    Args:
+        timing_class: ``can.BitTiming`` or ``can.BitTimingFd``.
+        options: Keyword arguments for the timing factory.
+
+    Yields:
+        Timing candidates; nothing when the installed python-can version cannot
+        compute a timing for the request.
+    """
+    iterate = getattr(timing_class, "iterate_from_sample_point", None)
+    if iterate is not None:
+        try:
+            yield from iterate(**options)
+        except (ValueError, ZeroDivisionError, TypeError):
+            return
+        return
+    factory = getattr(timing_class, "from_sample_point", None)
+    if factory is None:
+        return
+    try:
+        yield factory(**options)
+    except (ValueError, ZeroDivisionError, TypeError):
+        return
 
 
 def _python_can_classic_candidates(
@@ -100,22 +120,10 @@ def _python_can_classic_candidates(
         Timing candidates from ``python-can``; nothing when the installed
         version cannot compute a timing for the request.
     """
-    iterate = getattr(can.BitTiming, "iterate_from_sample_point", None)
-    if iterate is not None:
-        try:
-            yield from iterate(
-                f_clock=clock, bitrate=bitrate, sample_point=sample_point
-            )
-        except (ValueError, ZeroDivisionError, TypeError):
-            return
-        return
-    factory = getattr(can.BitTiming, "from_sample_point", None)
-    if factory is None:
-        return
-    try:
-        yield factory(f_clock=clock, bitrate=bitrate, sample_point=sample_point)
-    except (ValueError, ZeroDivisionError, TypeError):
-        return
+    yield from _python_can_candidates(
+        can.BitTiming,
+        {"f_clock": clock, "bitrate": bitrate, "sample_point": sample_point},
+    )
 
 
 def _python_can_fd_candidates(
@@ -140,32 +148,16 @@ def _python_can_fd_candidates(
     timing_fd = getattr(can, "BitTimingFd", None)
     if timing_fd is None:
         return
-    iterate = getattr(timing_fd, "iterate_from_sample_point", None)
-    if iterate is not None:
-        try:
-            yield from iterate(
-                f_clock=clock,
-                nom_bitrate=bitrate,
-                nom_sample_point=sample_point,
-                data_bitrate=data_bitrate,
-                data_sample_point=data_sample_point,
-            )
-        except (ValueError, ZeroDivisionError, TypeError):
-            return
-        return
-    factory = getattr(timing_fd, "from_sample_point", None)
-    if factory is None:
-        return
-    try:
-        yield factory(
-            f_clock=clock,
-            nom_bitrate=bitrate,
-            nom_sample_point=sample_point,
-            data_bitrate=data_bitrate,
-            data_sample_point=data_sample_point,
-        )
-    except (ValueError, ZeroDivisionError, TypeError):
-        return
+    yield from _python_can_candidates(
+        timing_fd,
+        {
+            "f_clock": clock,
+            "nom_bitrate": bitrate,
+            "nom_sample_point": sample_point,
+            "data_bitrate": data_bitrate,
+            "data_sample_point": data_sample_point,
+        },
+    )
 
 
 def _valid_candidates(
@@ -194,7 +186,6 @@ def _valid_candidates(
 def _search_timing(
     clock: int,
     bitrate: int,
-    sample_point: float,
     limits: TimingLimits,
     *,
     min_total_tq: int,
@@ -205,13 +196,12 @@ def _search_timing(
     Args:
         clock: CAN clock frequency in Hz.
         bitrate: Requested bitrate in bit/s.
-        sample_point: Requested sample point in percent.
         limits: Controller timing limits.
         min_total_tq: Minimum number of time quanta per bit.
         max_sjw: Maximum synchronization jump width to emit.
 
     Returns:
-        A list of valid timing candidates, sorted by deterministic preference.
+        A list of valid timing candidates.
     """
     candidates: List[BitTiming] = []
     step = limits.brp_inc or 1
@@ -231,16 +221,7 @@ def _search_timing(
             if sjw < 1:
                 continue
             candidates.append(BitTiming(prop=1, seg1=seg1 - 1, seg2=seg2, sjw=sjw, brp=brp))
-    return sorted(
-        candidates,
-        key=lambda item: (
-            abs(_sample_point(item) - sample_point),
-            item.brp,
-            -item.sjw,
-            _effective_seg1(item),
-            item.seg2,
-        ),
-    )
+    return candidates
 
 
 def _rank(timing: BitTiming, sample_point: float) -> Tuple[float, int, int, int, int]:
@@ -252,6 +233,45 @@ def _rank(timing: BitTiming, sample_point: float) -> Tuple[float, int, int, int,
         _effective_seg1(timing),
         timing.seg2,
     )
+
+
+def _best_candidate(
+    candidates: Iterable[BitTiming],
+    limits: TimingLimits,
+    sample_point: float,
+    error_message: str,
+) -> BitTiming:
+    """Return the best valid timing or raise with a descriptive message."""
+    valid = list(_valid_candidates(candidates, limits))
+    if not valid:
+        raise ValueError(error_message)
+    return min(valid, key=lambda item: _rank(item, sample_point))
+
+
+def _classic_candidates(
+    clock: int, bitrate: int, sample_point: float, limits: TimingLimits
+) -> List[BitTiming]:
+    """Collect python-can and exhaustive-search candidates for a nominal rate."""
+    python_can = (
+        _from_timing_values(
+            candidate.brp,
+            candidate.tseg1,
+            candidate.tseg2,
+            candidate.sjw,
+            _MAX_CLASSIC_SJW,
+        )
+        for candidate in _python_can_classic_candidates(clock, bitrate, sample_point)
+    )
+    return [
+        *python_can,
+        *_search_timing(
+            clock,
+            bitrate,
+            limits,
+            min_total_tq=_MIN_CLASSIC_TQ,
+            max_sjw=_MAX_CLASSIC_SJW,
+        ),
+    ]
 
 
 def select_classic_timing(
@@ -275,31 +295,18 @@ def select_classic_timing(
         raise ValueError("bitrate must be positive")
     if not 50.0 <= sample_point <= 95.0:
         raise ValueError("sample_point must be between 50 and 95 percent")
-
-    python_can_candidates = (
-        _from_python_can(candidate, _MAX_CLASSIC_SJW)
-        for candidate in _python_can_classic_candidates(
-            capability.fclk_can, bitrate, sample_point
-        )
+    error_message = (
+        f"no classic timing for {bitrate} bit/s at {sample_point}% with "
+        f"{capability.fclk_can} Hz clock"
     )
-    candidates = list(_valid_candidates(python_can_candidates, capability.limits))
-    candidates.extend(
-        _search_timing(
-            capability.fclk_can,
-            bitrate,
-            sample_point,
-            capability.limits,
-            min_total_tq=_MIN_CLASSIC_TQ,
-            max_sjw=_MAX_CLASSIC_SJW,
-        )
+    return _best_candidate(
+        _classic_candidates(
+            capability.fclk_can, bitrate, sample_point, capability.limits
+        ),
+        capability.limits,
+        sample_point,
+        error_message,
     )
-    if not candidates:
-        raise ValueError(
-            f"no classic timing for {bitrate} bit/s at {sample_point}% with "
-            f"{capability.fclk_can} Hz clock"
-        )
-    unique = list(_valid_candidates(candidates, capability.limits))
-    return min(unique, key=lambda item: _rank(item, sample_point))
 
 
 def select_fd_timing(
@@ -326,14 +333,18 @@ def select_fd_timing(
     Raises:
         ValueError: If any parameter is invalid or no compatible timing exists.
     """
+    if bitrate <= 0:
+        raise ValueError("bitrate must be positive")
     if data_bitrate < bitrate:
         raise ValueError("data_bitrate must be greater than or equal to bitrate")
+    if not 50.0 <= sample_point <= 95.0:
+        raise ValueError("sample_point must be between 50 and 95 percent")
     if not 50.0 <= data_sample_point <= 95.0:
         raise ValueError("data_sample_point must be between 50 and 95 percent")
 
-    nominal_candidates = [
-        select_classic_timing(bitrate, sample_point, nominal),
-    ]
+    nominal_candidates = _classic_candidates(
+        nominal.fclk_can, bitrate, sample_point, nominal.limits
+    )
     for candidate in _python_can_fd_candidates(
         nominal.fclk_can,
         bitrate,
@@ -350,36 +361,25 @@ def select_fd_timing(
                 _MAX_CLASSIC_SJW,
             )
         )
-    nominal_candidates.extend(
-        _search_timing(
-            nominal.fclk_can,
-            bitrate,
-            sample_point,
-            nominal.limits,
-            min_total_tq=_MIN_CLASSIC_TQ,
-            max_sjw=_MAX_CLASSIC_SJW,
-        )
+    nominal_best = _best_candidate(
+        nominal_candidates,
+        nominal.limits,
+        sample_point,
+        f"no classic timing for {bitrate} bit/s at {sample_point}% with "
+        f"{nominal.fclk_can} Hz clock",
     )
 
-    data_candidates = list(
+    data_best = _best_candidate(
         _search_timing(
             data.fclk_can,
             data_bitrate,
-            data_sample_point,
             data.limits,
             min_total_tq=_MIN_DATA_TQ,
             max_sjw=_MAX_DATA_SJW,
-        )
+        ),
+        data.limits,
+        data_sample_point,
+        f"no FD data timing for {data_bitrate} bit/s at {data_sample_point}% "
+        f"with {data.fclk_can} Hz clock",
     )
-    if not data_candidates:
-        raise ValueError(
-            f"no FD data timing for {data_bitrate} bit/s at {data_sample_point}% "
-            f"with {data.fclk_can} Hz clock"
-        )
-
-    nominal_best = min(
-        _valid_candidates(nominal_candidates, nominal.limits),
-        key=lambda item: _rank(item, sample_point),
-    )
-    data_best = min(data_candidates, key=lambda item: _rank(item, data_sample_point))
     return nominal_best, data_best

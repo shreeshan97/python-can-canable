@@ -15,7 +15,6 @@ from canable.protocol import (
     CAPABILITY_FD_FORMAT,
     DEVICE_VERSION_FORMAT,
     ERROR_STATE_FORMAT,
-    HOST_FORMAT_MAGIC,
     PID,
     REQUEST_IN,
     REQUEST_OUT,
@@ -132,10 +131,6 @@ class FakeUsbDevice:
         self.detached = False
         self.reattached = False
         self.configured = False
-
-    def prepare_default_open(self) -> None:
-        """Validate the host-format magic used during initialization."""
-        self.expected_host_format = struct.pack("<I", HOST_FORMAT_MAGIC)
 
     def get_active_configuration(self) -> object:
         """Return a dummy active configuration."""
